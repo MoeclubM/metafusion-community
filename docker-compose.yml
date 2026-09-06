@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  community:
+    build: .
+    container_name: metafusion-community
+    restart: unless-stopped
+    environment:
+      - PORT=8083
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=metafusion
+      - DB_NAME=metafusion_community
+    ports:
+      - "8083:8083"
+    networks:
+      - metafusion-net
+
+networks:
+  metafusion-net:
+    external: true
