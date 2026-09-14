@@ -34,27 +34,41 @@ func New(base string, timeout time.Duration) *Client {
 	return &Client{base: strings.TrimRight(base, "/"), http: &http.Client{Timeout: timeout}}
 }
 
-// Lookup 读取单个实体；实体不存在或对调用者不可见时返回 false。
-// 令牌从 context 取（由鉴权中间件写入），因此不需要每个调用点再传一次。
-func (c *Client) Lookup(ctx context.Context, entityID string) (Entity, bool) {
+// LookupRaw 原样返回目录服务的实体 JSON。本服务不重新定义目录 DTO：
+// 需要完整实体（例如收藏列表里的 entity 字段）时直接透传，字段不会在搬运中丢失。
+// 实体不存在或对调用者不可见时返回 false（目录侧统一 404）。
+func (c *Client) LookupRaw(ctx context.Context, entityID string) (json.RawMessage, bool) {
 	if c.base == "" || entityID == "" {
-		return Entity{}, false
+		return nil, false
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/catalog/entities/"+entityID, nil)
 	if err != nil {
-		return Entity{}, false
+		return nil, false
 	}
 	c.decorate(ctx, req)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return Entity{}, false
+		return nil, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var raw json.RawMessage
+	if err = json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+// Lookup 读取单个实体的最小投影（kind/title/status），用于可见性与标题判定。
+func (c *Client) Lookup(ctx context.Context, entityID string) (Entity, bool) {
+	raw, ok := c.LookupRaw(ctx, entityID)
+	if !ok {
 		return Entity{}, false
 	}
 	var e Entity
-	if err = json.NewDecoder(resp.Body).Decode(&e); err != nil || e.ID == "" {
+	if err := json.Unmarshal(raw, &e); err != nil || e.ID == "" {
 		return Entity{}, false
 	}
 	return e, true

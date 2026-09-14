@@ -58,7 +58,18 @@ CREATE TABLE IF NOT EXISTS community.topic_tags(
 CREATE INDEX IF NOT EXISTS topics_board ON community.topics(board_code,last_activity_at DESC);
 CREATE INDEX IF NOT EXISTS topics_entity ON community.topics(entity_id);
 CREATE INDEX IF NOT EXISTS posts_topic ON community.posts(topic_id,post_number);
--- 用户互动数据（收藏、评分、进度、持有）：属互动系统，不属目录元数据。
+-- 收藏：目标类型就是实体 kind（固定八种骨架），落库与读取不做词表映射，
+-- 表结构与主仓库 catalog.favorites 逐列一致，便于一次性导入。
+CREATE TABLE IF NOT EXISTS community.favorites(
+  user_id uuid NOT NULL,
+  target_type text NOT NULL CHECK (target_type IN ('agent','collection','work','content_unit','expression','release','medium','track')),
+  target_id uuid NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY(user_id,target_type,target_id)
+);
+CREATE INDEX IF NOT EXISTS favorites_target ON community.favorites(target_type, target_id);
+CREATE INDEX IF NOT EXISTS favorites_user_created ON community.favorites(user_id, created_at DESC);
+-- 用户互动数据（评分、进度、持有）：属互动系统，不属目录元数据。
 CREATE TABLE IF NOT EXISTS community.records(
   owner_id uuid NOT NULL,
   entity_id uuid NOT NULL,

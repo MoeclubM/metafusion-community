@@ -55,7 +55,7 @@ func main() {
 		c.Next()
 	})
 
-	handler.New(db.DB(), cat, verifier).Register(r)
+	handler.New(db, cat, verifier).Register(r)
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "live", "service": "metafusion-community"})

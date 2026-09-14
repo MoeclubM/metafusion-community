@@ -8,8 +8,10 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 - **拥有**：论坛板块/主题/回复/标签、条目短评（评论板块）、用户互动记录（`community.records`）。
 - **不拥有**：账号与令牌（问账号服务/目录服务验签）、实体元数据（问目录服务，不复制、不 JOIN）。
-- **过渡项**：个人收藏当前仍在主仓库 `catalog.favorites`（表带 `auth.users` 外键），随账号服务拆分（P3）
-  一并迁入本服务的 `community.records` 语义，届时前端 `/api/favorites/*` 由本服务承载。
+- **收藏**：`community.favorites`（表结构与主仓库 `catalog.favorites` 逐列一致，便于一次性导入），
+  前端 `/api/favorites/*`、`/api/users/{id}/favorites` 在切流后由本服务承载。
+- **遗留**：收藏"是否公开"目前只有前端只读占位（`frontend/src/app/settings/page.tsx` 的开关是
+  `disabled readOnly`，目录侧无对应字段），接口恒返回 `visible: true`；落地该开关时应由本服务承担。
 
 ## HTTP 契约
 
@@ -31,8 +33,12 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 | GET | `/api/community/posts/{id}` | 匿名 | 单条短评（稳定 permalink） |
 | DELETE | `/api/community/posts/{id}` | 作者/管理员 | 删短评（仅评论板块） |
 | GET | `/api/community/entities/{id}/collections` | 匿名 | 关联的合集（经目录关系接口，不 JOIN 目录表） |
+| POST | `/api/favorites/toggle` | 登录 | 切换收藏（目标必须是可见实体，且 kind 与 `target_type` 相符） |
+| GET | `/api/favorites/status` | 匿名 | 批量查询收藏状态（未登录返回空集合） |
+| GET | `/api/favorites/mine` | 登录 | 我的收藏（分页，目标按请求者可见性过滤） |
+| GET | `/api/users/{id}/favorites` | 匿名 | 指定用户的收藏列表（公开读，目标按可见性过滤） |
 | GET | `/api/records/entities/{id}` | 登录 | 本人的互动记录 |
-| PUT | `/api/records/entities/{id}` | 登录 | 写入互动记录（收藏/评分/进度/持有） |
+| PUT | `/api/records/entities/{id}` | 登录 | 写入互动记录（评分/进度/持有） |
 
 论坛主题与"实体短评"共用同一张 `community.topics`，靠板块区分语义：评论锚定实体、无独立标题、不进信息流；
 主题有标题、可独立成文、进信息流（`show_in_feed`）。
@@ -51,7 +57,8 @@ go run cmd/migrate
 
 - 幂等：全部 `ON CONFLICT DO NOTHING`，失败重跑安全；
 - **只读旧表**：不删除、不修改 `modules.*`，因此切流前随时可以取消，回滚只需把网关指回单体；
-- 顺序 `boards → topics → posts → tags → topic_tags → records`，满足外键依赖；
+- 顺序 `boards → topics → posts → tags → topic_tags → records → favorites`，满足外键依赖；
+  唯一跨 schema 的步骤是收藏（源表在主仓库的 `catalog.favorites`）；
 - 迁移窗口：切流前单体仍在写入，因此**切流时再跑一次**补齐增量。
 
 ## 环境变量

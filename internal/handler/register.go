@@ -3,23 +3,28 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/MoeclubM/metafusion-community/internal/auth"
 	"github.com/MoeclubM/metafusion-community/internal/catalog"
+	"github.com/MoeclubM/metafusion-community/internal/store"
 )
 
 // Handler 承载互动服务的 HTTP 契约：论坛（/api/community/*）与用户互动记录（/api/records/*）。
 // 路径与请求/响应形状与主仓库 modules 包逐字一致，切流时前端不需要任何改动。
 type Handler struct {
-	db       *sql.DB
+	// db 供迁移自单体的实现直接执行 SQL（与主仓库逐字一致，便于对照回归）。
+	db *sql.DB
+	// store 是新实现在用的自有 schema 访问层。
+	store    *store.Store
 	catalog  *catalog.Client
 	verifier *auth.Verifier
 }
 
-func New(db *sql.DB, cat *catalog.Client, verifier *auth.Verifier) *Handler {
-	return &Handler{db: db, catalog: cat, verifier: verifier}
+func New(s *store.Store, cat *catalog.Client, verifier *auth.Verifier) *Handler {
+	return &Handler{db: s.DB(), store: s, catalog: cat, verifier: verifier}
 }
 
 // Register 挂载全部路由。/api 前缀下统一先挂身份中间件：
@@ -29,6 +34,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	api.Use(h.verifier.Middleware())
 	h.registerForum(api)
 	h.registerCommunity(api)
+	h.registerFavorites(api)
 }
 
 // guard 是写操作的门槛：互动服务读接口对可见实体开放，写接口必须登录。
@@ -56,6 +62,16 @@ func Seed(ctx context.Context, db *sql.DB) error { return seedForum(ctx, db) }
 
 func fail(c *gin.Context, status int, code string) {
 	c.JSON(status, gin.H{"error": code})
+}
+
+// body 统一写接口的请求解析：2MB 上限，拒绝未知字段，错误码与主仓库一致。
+func body(c *gin.Context, v any) bool {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 2<<20)
+	if err := c.ShouldBindJSON(v); err != nil {
+		fail(c, 400, "invalid_payload")
+		return false
+	}
+	return true
 }
 
 func contains(values []string, v string) bool {

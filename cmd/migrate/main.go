@@ -22,6 +22,8 @@ import (
 
 type step struct {
 	name string
+	// schema 是旧表所在 schema；留空表示 modules（论坛与记录的老家）。
+	schema string
 	// required 为 true 表示旧表必须存在；false 表示旧表不存在就跳过（例如历史表）。
 	required bool
 	sql      string
@@ -45,6 +47,10 @@ var steps = []step{
 		ON CONFLICT DO NOTHING`},
 	{name: "records", required: false, sql: `INSERT INTO community.records(owner_id,entity_id,document) SELECT owner_id,entity_id,document FROM modules.records
 		ON CONFLICT (owner_id,entity_id) DO NOTHING`},
+	// 收藏在目录 schema 里（catalog.favorites），表结构与 community.favorites 逐列一致。
+	{name: "favorites", schema: "catalog", required: false, sql: `INSERT INTO community.favorites(user_id,target_type,target_id,created_at)
+		SELECT user_id,target_type,target_id,created_at FROM catalog.favorites
+		ON CONFLICT (user_id,target_type,target_id) DO NOTHING`},
 	// 更早的实体短评表（modules.posts）已被单体并入论坛评论板块；这里对尚未执行的部署补做一次。
 	{name: "legacy_posts", required: false, sql: `INSERT INTO community.topics(id,board_code,author_id,author_name,title,body,entity_id,created_at,updated_at,last_activity_at)
 		SELECT p.id,'comment',p.author_id,COALESCE(NULLIF(p.author_name,''),'Anonymous'),'',p.body,p.entity_id,p.created_at,p.created_at,p.created_at
@@ -69,23 +75,28 @@ func main() {
 	defer db.Close()
 
 	for _, s := range steps {
-		exists, err := tableExists(ctx, db, "modules", legacyTable(s.name))
+		schema := s.schema
+		if schema == "" {
+			schema = "modules"
+		}
+		legacy := schema + "." + legacyTable(s.name)
+		exists, err := tableExists(ctx, db, schema, legacyTable(s.name))
 		if err != nil {
 			log.Fatalf("inspect %s failed: %v", s.name, err)
 		}
 		if !exists {
 			if s.required {
-				log.Fatalf("legacy table modules.%s is missing; run this tool before the module is retired", legacyTable(s.name))
+				log.Fatalf("legacy table %s is missing; run this tool before the source system is retired", legacy)
 			}
-			fmt.Printf("%-12s skip (legacy table missing)\n", s.name)
+			fmt.Printf("%-12s skip (legacy table %s missing)\n", s.name, legacy)
 			continue
 		}
 		if *dryRun {
 			var n int
-			if err := db.QueryRowContext(ctx, "SELECT count(*) FROM "+legacyTableSQL(s.name)).Scan(&n); err != nil {
+			if err := db.QueryRowContext(ctx, "SELECT count(*) FROM "+legacy).Scan(&n); err != nil {
 				log.Fatalf("count %s failed: %v", s.name, err)
 			}
-			fmt.Printf("%-12s legacy rows: %d\n", s.name, n)
+			fmt.Printf("%-12s legacy rows in %s: %d\n", s.name, legacy, n)
 			continue
 		}
 		res, err := db.ExecContext(ctx, s.sql)
@@ -121,8 +132,6 @@ func legacyTable(step string) string {
 	}
 	return step
 }
-
-func legacyTableSQL(step string) string { return "modules." + legacyTable(step) }
 
 func tableExists(ctx context.Context, db *sql.DB, schema, table string) (bool, error) {
 	var exists bool
