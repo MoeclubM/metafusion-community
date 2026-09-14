@@ -7,15 +7,18 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 ## 职责边界
 
 - **拥有**：论坛板块/主题/回复/标签、条目短评（评论板块）、用户互动记录（`community.records`）。
-- **不拥有**：账号与令牌（问账号服务/目录服务验签）、实体元数据（问目录服务，不复制、不 JOIN）。
-- **收藏**：`community.favorites`（表结构与主仓库 `catalog.favorites` 逐列一致，便于一次性导入），
-  前端 `/api/favorites/*`、`/api/users/{id}/favorites` 在切流后由本服务承载。
+- **不拥有**：账号与令牌（令牌只由账号服务签发，本服务只验签；存量不透明令牌也问账号服务）、
+  实体元数据（问目录服务，不复制、不 JOIN）。
+- **收藏**：`community.favorites`（表结构与原 `catalog.favorites` 逐列一致，便于一次性导入），
+  前端 `/api/favorites/*`、`/api/users/{id}/favorites` 由本服务承载。**合并旧身份的收藏不再由目录改写**：
+  读取时经 `/api/catalog/entities/{id}/resolve` 跟随重定向，因此收藏不会因实体合并而消失。
 - **遗留**：收藏"是否公开"目前只有前端只读占位（`frontend/src/app/settings/page.tsx` 的开关是
   `disabled readOnly`，目录侧无对应字段），接口恒返回 `visible: true`；落地该开关时应由本服务承担。
 
 ## HTTP 契约
 
-路径与请求/响应形状与主仓库 `modules` 包**逐字一致**，切流时前端零改动。
+路径与请求/响应形状与原单体 `modules` 包**逐字一致**，切流时前端零改动。已切流（2026-09-14，开发实例）：
+网关把 `/api/community/*`、`/api/favorites/*`、`/api/records/*`、`^/api/users/[^/]+/favorites$` 指到本服务。
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
@@ -73,10 +76,11 @@ go run cmd/migrate -direction back
 | --- | --- | --- |
 | `PORT` | `8083` | 监听端口 |
 | `DATABASE_URL` | 由 `DB_*` 拼装 | PostgreSQL 连接串（本服务只使用 `community` schema） |
-| `COMMUNITY_JWKS_URL` | `http://catalog:8080/api/oidc/jwks` | 验签公钥来源；账号服务上线后改指向 auth |
+| `COMMUNITY_JWKS_URL` | `http://auth:8081/api/oidc/jwks` | 验签公钥来源：账号服务是唯一签发方 |
+| `AUTH_URL` | 空 | 账号服务地址，仅用于存量不透明会话令牌的兜底解析（`GET /api/auth/me`）；留空即"只接受 JWT" |
 | `AUTH_JWT_PUBLIC_KEY` | 空 | 静态公钥（PEM 或 base64 PEM）；设置后不再请求 JWKS |
 | `AUTH_JWT_ISSUER` / `AUTH_JWT_AUDIENCE` | `https://findverse.cc/api` / `metafusion` | 与主仓库一致，避免存量令牌失效 |
-| `CATALOG_URL` | `http://catalog:8080` | 目录服务地址（可见性、标题、关系邻居） |
+| `CATALOG_URL` | `http://backend:8080` | 目录服务地址（可见性、标题、关系邻居） |
 | `COMMUNITY_CATALOG_TIMEOUT_MS` | `5000` | 单次目录调用超时 |
 
 ## 运行

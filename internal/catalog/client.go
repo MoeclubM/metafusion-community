@@ -37,11 +37,23 @@ func New(base string, timeout time.Duration) *Client {
 // LookupRaw 原样返回目录服务的实体 JSON。本服务不重新定义目录 DTO：
 // 需要完整实体（例如收藏列表里的 entity 字段）时直接透传，字段不会在搬运中丢失。
 // 实体不存在或对调用者不可见时返回 false（目录侧统一 404）。
+//
+// 已合并的旧身份会先 404（合并后旧 id 不再可见），此时再用 /resolve 跟随重定向：
+// 合并只广播事件、不在别人表里改引用，跟随重定向是引用方自己的责任，
+// 否则用户收藏/互动记录里指向旧身份的条目会静默消失。
 func (c *Client) LookupRaw(ctx context.Context, entityID string) (json.RawMessage, bool) {
 	if c.base == "" || entityID == "" {
 		return nil, false
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/catalog/entities/"+entityID, nil)
+	if raw, ok := c.fetchEntity(ctx, entityID); ok {
+		return raw, true
+	}
+	return c.fetchEntity(ctx, entityID+"/resolve")
+}
+
+// fetchEntity 取一次实体端点（suffix 为空即 GET /entities/{id}，为 /resolve 时跟随合并重定向）。
+func (c *Client) fetchEntity(ctx context.Context, path string) (json.RawMessage, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/catalog/entities/"+path, nil)
 	if err != nil {
 		return nil, false
 	}
@@ -163,40 +175,6 @@ func (c *Client) Related(ctx context.Context, entityID string, kinds []string) [
 		}
 	}
 	return out
-}
-
-// Resolve 用会话令牌换身份（迁移期兜底）。账号服务拆分完成后这条链路可以直接关掉。
-func (c *Client) Resolve(ctx context.Context, bearer, cookie string) (*auth.Principal, bool) {
-	if c.base == "" || (bearer == "" && cookie == "") {
-		return nil, false
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/auth/me", nil)
-	if err != nil {
-		return nil, false
-	}
-	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
-	}
-	if cookie != "" {
-		req.AddCookie(&http.Cookie{Name: "mf_session", Value: cookie})
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, false
-	}
-	var user struct {
-		ID       string `json:"id"`
-		Username string `json:"username"`
-		Role     string `json:"role"`
-	}
-	if err = json.NewDecoder(resp.Body).Decode(&user); err != nil || user.ID == "" {
-		return nil, false
-	}
-	return &auth.Principal{ID: user.ID, Username: user.Username, Role: user.Role}, true
 }
 
 func (c *Client) decorate(ctx context.Context, req *http.Request) {
