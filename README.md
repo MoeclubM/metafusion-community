@@ -1,15 +1,81 @@
 # MetaFusion Community
 
-MetaFusion 社区交流、讨论版块、楼层回复与条目动态评分系统微服务。
+MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目短评与用户互动记录（收藏、评分、进度、持有）。
 
-## 💬 核心定位
+拆分基准见主仓库 [docs/architecture/service-split-migration.md](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/service-split-migration.md) 的 P2 阶段。
 
-作为 MetaFusion 平台的独立社区讨论中枢，负责话题交流、条目讨论楼、评分打分与用户互动。通过单向只读引用实体 UUID（`target_entity_id`）挂载到元数据系统，不侵入核心目录数据库。
+## 职责边界
 
-- **主项目 (Core Catalog)**: [MetaFusion](https://github.com/MoeclubM/MetaFusion)
+- **拥有**：论坛板块/主题/回复/标签、条目短评（评论板块）、用户互动记录（`community.records`）。
+- **不拥有**：账号与令牌（问账号服务/目录服务验签）、实体元数据（问目录服务，不复制、不 JOIN）。
+- **过渡项**：个人收藏当前仍在主仓库 `catalog.favorites`（表带 `auth.users` 外键），随账号服务拆分（P3）
+  一并迁入本服务的 `community.records` 语义，届时前端 `/api/favorites/*` 由本服务承载。
 
-## 🚀 启动运行
+## HTTP 契约
+
+路径与请求/响应形状与主仓库 `modules` 包**逐字一致**，切流时前端零改动。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/api/community/boards` | 匿名 | 板块列表（后台可增删改） |
+| GET | `/api/community/topics` | 匿名 | 主题列表：板块/标签/语言/关键词筛选、置顶优先、分页 |
+| GET | `/api/community/topic-tags` | 匿名 | 标签清单（`[{id,name}]`，供前端按 id 筛选） |
+| GET | `/api/community/topics/{id}` | 匿名 | 主题详情（含回复、标签、锚定实体题名）；浏览量自增 |
+| POST | `/api/community/topics` | 登录 | 发主题（可锚定实体、可带标签） |
+| POST | `/api/community/topics/{id}/posts` | 登录 | 回帖（`post_number` 楼层、可引用楼号） |
+| DELETE | `/api/community/topics/{id}` | 作者/管理员 | 删主题（级联回复） |
+| DELETE | `/api/community/topics/{id}/posts/{postId}` | 作者/管理员 | 删回复 |
+| GET | `/api/community/feed` | 匿名 | 站点级评论流（跨实体聚合，带条目标题；`q` 有界窗口过滤） |
+| GET | `/api/community/entities/{id}/posts` | 匿名 | 某实体下的短评 |
+| POST | `/api/community/entities/{id}/posts` | 登录 | 发表短评 |
+| GET | `/api/community/posts/{id}` | 匿名 | 单条短评（稳定 permalink） |
+| DELETE | `/api/community/posts/{id}` | 作者/管理员 | 删短评（仅评论板块） |
+| GET | `/api/community/entities/{id}/collections` | 匿名 | 关联的合集（经目录关系接口，不 JOIN 目录表） |
+| GET | `/api/records/entities/{id}` | 登录 | 本人的互动记录 |
+| PUT | `/api/records/entities/{id}` | 登录 | 写入互动记录（收藏/评分/进度/持有） |
+
+论坛主题与"实体短评"共用同一张 `community.topics`，靠板块区分语义：评论锚定实体、无独立标题、不进信息流；
+主题有标题、可独立成文、进信息流（`show_in_feed`）。
+
+## 数据与迁移
+
+本服务拥有 `community` schema，表结构与主仓库 `modules` 包中的 `forum_*` / `records` **逐列一致**，
+因此切流前可用附带的一次性导入工具搬运数据，不需要字段映射：
+
+```bash
+# 先看规模（不写入）
+go run cmd/migrate -dry-run
+# 切流时执行；第二次运行只补增量
+go run cmd/migrate
+```
+
+- 幂等：全部 `ON CONFLICT DO NOTHING`，失败重跑安全；
+- **只读旧表**：不删除、不修改 `modules.*`，因此切流前随时可以取消，回滚只需把网关指回单体；
+- 顺序 `boards → topics → posts → tags → topic_tags → records`，满足外键依赖；
+- 迁移窗口：切流前单体仍在写入，因此**切流时再跑一次**补齐增量。
+
+## 环境变量
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `PORT` | `8083` | 监听端口 |
+| `DATABASE_URL` | 由 `DB_*` 拼装 | PostgreSQL 连接串（本服务只使用 `community` schema） |
+| `COMMUNITY_JWKS_URL` | `http://catalog:8080/api/oidc/jwks` | 验签公钥来源；账号服务上线后改指向 auth |
+| `AUTH_JWT_PUBLIC_KEY` | 空 | 静态公钥（PEM 或 base64 PEM）；设置后不再请求 JWKS |
+| `AUTH_JWT_ISSUER` / `AUTH_JWT_AUDIENCE` | `https://findverse.cc/api` / `metafusion` | 与主仓库一致，避免存量令牌失效 |
+| `CATALOG_URL` | `http://catalog:8080` | 目录服务地址（可见性、标题、关系邻居） |
+| `COMMUNITY_CATALOG_TIMEOUT_MS` | `5000` | 单次目录调用超时 |
+
+## 运行
 
 ```bash
 go run cmd/server/main.go
+go test ./... && go vet ./...
 ```
+
+## 迁移状态
+
+- 主仓库仍提供 `/api/community/*` 与 `/api/records/*`（当前线上流量入口），本服务为切流目标；
+  两者共用同一份表结构的复制体，切流前靠 `cmd/migrate` 同步，切流后旧实现随 `modules` 包下线。
+- 实体合并（`entity.merged`）后的引用改写：旧实现由单体订阅 outbox 完成；本服务的增量消费
+  在 P4 与跨服务事件通道一起确定，当前不消费事件。
