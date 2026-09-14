@@ -49,11 +49,17 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 因此切流前可用附带的一次性导入工具搬运数据，不需要字段映射：
 
 ```bash
-# 先看规模（不写入）
-go run cmd/migrate -dry-run
-# 切流时执行；第二次运行只补增量
-go run cmd/migrate
+# 切换前：先看规模（不写入），再搬运
+go run cmd/migrate -direction forward -dry-run
+go run cmd/migrate -direction forward
+
+# 回滚时：先把服务期间写入的行搬回单体，再改网关指回单体
+go run cmd/migrate -direction back -dry-run
+go run cmd/migrate -direction back
 ```
+
+两个方向都存在，切流才是真的可回滚：**先搬数据再改网关**，否则回滚窗口内的新帖在单体侧会"消失"。
+完整步骤与逐步验证见主仓库 [docs/architecture/cutover-runbook.md](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/cutover-runbook.md)。
 
 - 幂等：全部 `ON CONFLICT DO NOTHING`，失败重跑安全；
 - **只读旧表**：不删除、不修改 `modules.*`，因此切流前随时可以取消，回滚只需把网关指回单体；
