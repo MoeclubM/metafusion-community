@@ -11,6 +11,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+
+	"github.com/MoeclubM/metafusion-community/internal/auth"
 )
 
 // registerCommunity 挂载短评（评论流/条目评论）与用户互动记录。
@@ -172,7 +174,8 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 		p := h.principal(c)
 		query := "DELETE FROM community.topics WHERE id=$1 AND board_code=$2 AND author_id=$3"
 		args := []any{c.Param("id"), commentBoard, p.ID}
-		if p.Role == "admin" {
+		// 短评与帖子同属"内容治理"：删他人的短评用 community.post.moderate（原判据是 admin 角色）。
+		if p.Can(auth.PermissionPostModerate) {
 			query = "DELETE FROM community.topics WHERE id=$1 AND board_code=$2"
 			args = args[:2]
 		}

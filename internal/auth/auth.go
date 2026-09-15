@@ -20,12 +20,16 @@ import (
 	"github.com/MoeclubM/metafusion-community/internal/config"
 )
 
-// Principal 是验签后的调用者身份。只信令牌里的三位信息；
-// 具体能编辑、能下载什么由各服务自己按业务规则判断。
+// Principal 是验签后的调用者身份。只信令牌里声明的这几项信息；
+// 具体能编辑、能下载什么由各服务自己按业务规则判断（一律走 Can，不比较角色字符串）。
 type Principal struct {
 	ID       string `json:"id"`
 	Username string `json:"username"`
 	Role     string `json:"role"`
+	// Groups/Permissions 是账号服务的权限组投影，字段名与签发侧逐字一致
+	// （令牌 claims 与 /api/auth/me 都叫 groups / permissions）。
+	Groups      []string `json:"groups"`
+	Permissions []string `json:"permissions"`
 }
 
 // SessionResolver 是存量令牌的兜底：用户可能还持有登录时发的不透明会话令牌（不是 JWT）。
@@ -72,14 +76,20 @@ func (c *SessionClient) Resolve(ctx context.Context, bearer, cookie string) (*Pr
 		return nil, false
 	}
 	var user struct {
-		ID       string `json:"id"`
-		Username string `json:"username"`
-		Role     string `json:"role"`
+		ID          string   `json:"id"`
+		Username    string   `json:"username"`
+		Role        string   `json:"role"`
+		Groups      []string `json:"groups"`
+		Permissions []string `json:"permissions"`
 	}
 	if err = json.NewDecoder(resp.Body).Decode(&user); err != nil || user.ID == "" {
 		return nil, false
 	}
-	return &Principal{ID: user.ID, Username: user.Username, Role: user.Role}, true
+	// 权限组随 /api/auth/me 一起下发，缺字段（旧账号服务）时为空：判定层据此退回角色兜底。
+	return &Principal{
+		ID: user.ID, Username: user.Username, Role: user.Role,
+		Groups: user.Groups, Permissions: user.Permissions,
+	}, true
 }
 
 // Verifier 只做一件事：把请求换算成身份。
@@ -100,6 +110,10 @@ type Verifier struct {
 type claims struct {
 	Username string `json:"preferred_username"`
 	Role     string `json:"role"`
+	// 权限组与权限码：与账号服务 store.Claims 的 json 名逐字一致，否则后台分配的
+	// 权限组到了本服务就是空的（老令牌不带这两项，走 Can 的角色兜底）。
+	Groups      []string `json:"groups"`
+	Permissions []string `json:"permissions"`
 	jwt.RegisteredClaims
 }
 
@@ -191,7 +205,10 @@ func (v *Verifier) Verify(token string) (*Principal, error) {
 	if c.Subject == "" {
 		return nil, errors.New("token without subject")
 	}
-	return &Principal{ID: c.Subject, Username: c.Username, Role: c.Role}, nil
+	return &Principal{
+		ID: c.Subject, Username: c.Username, Role: c.Role,
+		Groups: c.Groups, Permissions: c.Permissions,
+	}, nil
 }
 
 func (v *Verifier) publicKey(kid string) (*rsa.PublicKey, error) {
@@ -363,6 +380,3 @@ func Current(c *gin.Context) *Principal {
 	}
 	return nil
 }
-
-// IsAdmin 是纯函数：仅 admin 角色可管理他人文件。
-func IsAdmin(p *Principal) bool { return p != nil && p.Role == "admin" }

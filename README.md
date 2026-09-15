@@ -28,13 +28,13 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 | GET | `/api/community/topics/{id}` | 匿名 | 主题详情（含回复、标签、锚定实体题名）；浏览量自增 |
 | POST | `/api/community/topics` | 登录 | 发主题（可锚定实体、可带标签） |
 | POST | `/api/community/topics/{id}/posts` | 登录 | 回帖（`post_number` 楼层、可引用楼号） |
-| DELETE | `/api/community/topics/{id}` | 作者/管理员 | 删主题（级联回复） |
-| DELETE | `/api/community/topics/{id}/posts/{postId}` | 作者/管理员 | 删回复 |
+| DELETE | `/api/community/topics/{id}` | 作者 / `community.post.moderate` | 删主题（级联回复） |
+| DELETE | `/api/community/topics/{id}/posts/{postId}` | 作者 / `community.post.moderate` | 删回复 |
 | GET | `/api/community/feed` | 匿名 | 站点级评论流（跨实体聚合，带条目标题；`q` 有界窗口过滤） |
 | GET | `/api/community/entities/{id}/posts` | 匿名 | 某实体下的短评 |
 | POST | `/api/community/entities/{id}/posts` | 登录 | 发表短评 |
 | GET | `/api/community/posts/{id}` | 匿名 | 单条短评（稳定 permalink） |
-| DELETE | `/api/community/posts/{id}` | 作者/管理员 | 删短评（仅评论板块） |
+| DELETE | `/api/community/posts/{id}` | 作者 / `community.post.moderate` | 删短评（仅评论板块） |
 | GET | `/api/community/entities/{id}/collections` | 匿名 | 关联的合集（经目录关系接口，不 JOIN 目录表） |
 | POST | `/api/favorites/toggle` | 登录 | 切换收藏（目标必须是可见实体，且 kind 与 `target_type` 相符） |
 | GET | `/api/favorites/status` | 匿名 | 批量查询收藏状态（未登录返回空集合） |
@@ -45,6 +45,22 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 论坛主题与"实体短评"共用同一张 `community.topics`，靠板块区分语义：评论锚定实体、无独立标题、不进信息流；
 主题有标题、可独立成文、进信息流（`show_in_feed`）。
+
+## 权限
+
+写权限以**账号服务下发的权限码**为准（访问令牌 claims 与 `/api/auth/me` 的 `permissions`，admin 组带 `*` 通配），
+判定集中在一处：`internal/auth/permission.go` 的 `Can`。组码与角色不参与判定——散落的角色比较正是
+「后台给用户分配了子系统权限组、本服务却不认」的成因。
+
+| 权限码 | 本服务用在哪 |
+| --- | --- |
+| `community.post.moderate` | 删除**他人**的主题、回复与短评（作者删自己的内容不需要任何码） |
+| `community.post.create` | 发主题/回帖/短评。写接口当前只要求登录，尚未按码收口（member 组持有该码） |
+| `community.topic.pin` / `community.board.manage` | 已声明，本服务暂无置顶与板块管理写接口 |
+
+**兼容策略**：令牌**完全没有** `permissions` 声明时（老令牌，或尚未按权限组配置的实例）按历史角色兜底：
+`role=admin` 放行本服务全部码，其它角色与匿名不放行——边界与改造前一致；令牌一旦带 `permissions` 就只认码，
+角色不再额外放行，避免「角色兜底」变成绕过权限组的后门。
 
 ## 数据与迁移
 

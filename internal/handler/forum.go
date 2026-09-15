@@ -573,12 +573,15 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 		})
 	})
 
-	// 主题删除：作者本人或管理员。
+	// 主题删除：作者本人，或持有帖子治理权限码的人。
 	api.DELETE("/community/topics/:id", h.guard(true), func(c *gin.Context) {
 		p := h.principal(c)
 		q := "DELETE FROM community.topics WHERE id=$1 AND author_id=$2"
 		args := []any{c.Param("id"), p.ID}
-		if p.Role == "admin" {
+		// 删别人的主题属"帖子治理"，对齐账号服务的 community.post.moderate：
+		// 这是 moderator 与 community_admin 都持有的实际治理码；topic.pin 只覆盖置顶、
+		// board.manage 只管板块结构，都不能替代"处置内容"这一语义。
+		if p.Can(auth.PermissionPostModerate) {
 			q = "DELETE FROM community.topics WHERE id=$1"
 			args = args[:1]
 		}
@@ -594,13 +597,13 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 		c.JSON(200, gin.H{"ok": true})
 	})
 
-	// 回复删除：作者本人或管理员。
+	// 回复删除：作者本人，或持有帖子治理权限码的人（同主题删除：删他人的回复是治理行为）。
 	api.DELETE("/community/topics/:id/posts/:postId", h.guard(true), func(c *gin.Context) {
 		p := h.principal(c)
 		topicID, postID := c.Param("id"), c.Param("postId")
 		q := "DELETE FROM community.posts WHERE id=$1 AND topic_id=$2 AND author_id=$3"
 		args := []any{postID, topicID, p.ID}
-		if p.Role == "admin" {
+		if p.Can(auth.PermissionPostModerate) {
 			q = "DELETE FROM community.posts WHERE id=$1 AND topic_id=$2"
 			args = args[:2]
 		}

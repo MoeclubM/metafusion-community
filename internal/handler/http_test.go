@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,10 +53,21 @@ func jwksServer(t *testing.T, key *rsa.PrivateKey) (*httptest.Server, string) {
 	return srv, kid
 }
 
+// testSubject 是测试令牌的固定 sub：老令牌用例与它无关，但权限用例需要多个身份。
+const testSubject = "11111111-1111-1111-1111-111111111111"
+
+// signToken 签发**老令牌**：claims 里没有 groups / permissions，本服务只能按角色兜底。
 func signToken(t *testing.T, key *rsa.PrivateKey, kid, role string) string {
 	t.Helper()
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
-		"sub":                "11111111-1111-1111-1111-111111111111",
+	return signTokenWith(t, key, kid, testSubject, role, nil, nil)
+}
+
+// signTokenWith 签发带权限组的令牌：groups / permissions 的 claims 名与账号服务逐字一致，
+// 用来验证"后台分配的权限组能被本服务读到"这条链路。
+func signTokenWith(t *testing.T, key *rsa.PrivateKey, kid, sub, role string, groups, permissions []string) string {
+	t.Helper()
+	claims := jwt.MapClaims{
+		"sub":                sub,
 		"preferred_username": "kana",
 		"role":               role,
 		"iss":                testIssuer,
@@ -63,7 +75,14 @@ func signToken(t *testing.T, key *rsa.PrivateKey, kid, role string) string {
 		"exp":                time.Now().Add(10 * time.Minute).Unix(),
 		"iat":                time.Now().Unix(),
 		"jti":                "test-jti",
-	})
+	}
+	if len(groups) > 0 {
+		claims["groups"] = groups
+	}
+	if len(permissions) > 0 {
+		claims["permissions"] = permissions
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	token.Header["kid"] = kid
 	signed, err := token.SignedString(key)
 	if err != nil {
@@ -101,7 +120,10 @@ func TestMiddlewareResolvesPrincipalFromJWKS(t *testing.T) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "anonymous"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"id": p.ID, "role": p.Role, "username": p.Username})
+		c.JSON(http.StatusOK, gin.H{
+			"id": p.ID, "role": p.Role, "username": p.Username,
+			"groups": strings.Join(p.Groups, ","), "permissions": strings.Join(p.Permissions, ","),
+		})
 	})
 
 	// 匿名：应视为未登录（而不是报错）。
@@ -123,6 +145,24 @@ func TestMiddlewareResolvesPrincipalFromJWKS(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &got)
 	if got["role"] != "editor" || got["username"] != "kana" {
 		t.Fatalf("身份还原不符: %v", got)
+	}
+
+	// 带权限组的令牌：groups / permissions 必须原样落到 Principal（否则后台分配的权限组白给）。
+	req = httptest.NewRequest(http.MethodGet, "/api/probe", nil)
+	req.Header.Set("Authorization", "Bearer "+signTokenWith(t, key, kid, testSubject, "user",
+		[]string{"community_moderator"}, []string{auth.PermissionPostCreate, auth.PermissionPostModerate}))
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("带权限组的令牌应 200，实际 %d（%s）", w.Code, w.Body.String())
+	}
+	got = map[string]string{}
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	if got["groups"] != "community_moderator" {
+		t.Fatalf("权限组未还原: %v", got)
+	}
+	if got["permissions"] != auth.PermissionPostCreate+","+auth.PermissionPostModerate {
+		t.Fatalf("权限码未还原: %v", got)
 	}
 
 	// 错误受众的令牌必须被拒（防止跨依赖方混用）。
