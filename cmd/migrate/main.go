@@ -54,8 +54,9 @@ var forwardSteps = []step{
 				(SELECT NULLIF(btrim(v),'') FROM jsonb_each_text(descriptions) ORDER BY key LIMIT 1), ''),
 			color,icon,sort_order,is_enabled,show_in_feed FROM modules.forum_boards
 		ON CONFLICT (code) DO NOTHING`},
-	{name: "topics", table: "forum_topics", sql: `INSERT INTO community.topics(id,board_code,author_id,author_name,title,body,language,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at)
-		SELECT id,board_code,author_id,author_name,title,body,language,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at FROM modules.forum_topics
+	// 目标侧（community.topics）自 000003 起没有 language 列：老表有也刻意不带过去（论坛不再分语言）。
+	{name: "topics", table: "forum_topics", sql: `INSERT INTO community.topics(id,board_code,author_id,author_name,title,body,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at)
+		SELECT id,board_code,author_id,author_name,title,body,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at FROM modules.forum_topics
 		ON CONFLICT (id) DO NOTHING`},
 	{name: "posts", table: "forum_posts", sql: `INSERT INTO community.posts(id,topic_id,author_id,author_name,body,post_number,reply_to_post_number,created_at,updated_at)
 		SELECT id,topic_id,author_id,author_name,body,post_number,reply_to_post_number,created_at,updated_at FROM modules.forum_posts
@@ -86,8 +87,9 @@ var backSteps = []step{
 			jsonb_build_object('zh-CN', description),
 			color,icon,sort_order,is_enabled,show_in_feed FROM community.boards
 		ON CONFLICT (code) DO NOTHING`},
+	// 反向搬运要写回老表：老表仍带 language（四语时代结构），而源表已无该列，补空串。
 	{name: "topics", schema: "community", sql: `INSERT INTO modules.forum_topics(id,board_code,author_id,author_name,title,body,language,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at)
-		SELECT id,board_code,author_id,author_name,title,body,language,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at FROM community.topics
+		SELECT id,board_code,author_id,author_name,title,body,''::text,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at FROM community.topics
 		ON CONFLICT (id) DO NOTHING`},
 	{name: "posts", schema: "community", sql: `INSERT INTO modules.forum_posts(id,topic_id,author_id,author_name,body,post_number,reply_to_post_number,created_at,updated_at)
 		SELECT id,topic_id,author_id,author_name,body,post_number,reply_to_post_number,created_at,updated_at FROM community.posts

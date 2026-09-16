@@ -169,3 +169,62 @@ func TestBoardSingleLanguageMigrationBackfillsAndDropsLegacyColumns(t *testing.T
 		t.Fatalf("重复执行改动了数据: name=%q description=%q", name, description)
 	}
 }
+
+// 000003 的语义：主题不再带语言维度，language 列退役。
+//
+// 同样在一个**回滚事务**里做：先把列加回来（模拟“只跑过 000001/000002”的实例）并写一条带语言的主题，
+// 再执行 000003 的内容，断言列消失、主题行仍在、重复执行幂等，最后 ROLLBACK——不给同库其它包留下改过的结构。
+func TestTopicsDropLanguageMigrationRemovesColumn(t *testing.T) {
+	db := testutil.Database(t)
+	ctx := context.Background()
+	if err := Apply(ctx, db); err != nil {
+		t.Fatalf("先应用全部迁移: %v", err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开启事务: %v", err)
+	}
+	defer tx.Rollback()
+
+	if _, err = tx.ExecContext(ctx, "ALTER TABLE community.topics ADD COLUMN IF NOT EXISTS language text NOT NULL DEFAULT ''"); err != nil {
+		t.Fatalf("造旧结构: %v", err)
+	}
+	const probeID = "00000000-0000-0000-0000-0000000000aa"
+	const probeBoard = "lang-probe"
+	if _, err = tx.ExecContext(ctx, "INSERT INTO community.boards(code,name,description,color,icon,sort_order)"+
+		" VALUES($1,'语言探针','','slate','Hash',998) ON CONFLICT (code) DO NOTHING", probeBoard); err != nil {
+		t.Fatalf("插入探针板块: %v", err)
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO community.topics(id,board_code,author_id,author_name,title,body,language)"+
+		" VALUES($1,$2,'00000000-0000-0000-0000-0000000000bb','tester','探针主题','正文','zh') ON CONFLICT (id) DO NOTHING", probeID, probeBoard); err != nil {
+		t.Fatalf("插入带语言的主题: %v", err)
+	}
+
+	raw, err := fs.ReadFile(migrations.FS, "000003_topics_drop_language.up.sql")
+	if err != nil {
+		t.Fatalf("读取 000003: %v", err)
+	}
+	if _, err = tx.ExecContext(ctx, string(raw)); err != nil {
+		t.Fatalf("执行 000003: %v", err)
+	}
+
+	var exists bool
+	if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='community' AND table_name='topics' AND column_name='language')").Scan(&exists); err != nil {
+		t.Fatalf("查列: %v", err)
+	}
+	if exists {
+		t.Fatal("迁移后 community.topics.language 仍存在")
+	}
+	// 删的只是语言维度，主题内容本身不能丢。
+	var title string
+	if err = tx.QueryRowContext(ctx, "SELECT title FROM community.topics WHERE id=$1", probeID).Scan(&title); err != nil {
+		t.Fatalf("主题行不应被删: %v", err)
+	}
+	if title != "探针主题" {
+		t.Fatalf("title = %q，期望 %q", title, "探针主题")
+	}
+	// 幂等：同一份内容再跑一次不能报错。
+	if _, err = tx.ExecContext(ctx, string(raw)); err != nil {
+		t.Fatalf("重复执行 000003 必须幂等: %v", err)
+	}
+}

@@ -57,8 +57,8 @@ func TestPaginationWindowsAgainstPostgres(t *testing.T) {
 	}
 	// 主题列表按 last_activity_at DESC 排序：让越靠前的越新，顺序确定。
 	for i := 0; i < 5; i++ {
-		if _, err = db.ExecContext(ctx, `INSERT INTO community.topics(id,board_code,author_id,author_name,title,body,language,created_at,updated_at,last_activity_at)
-			VALUES($1,$2,$3,'tester',$4,'body','zh',now(),now(),now() - make_interval(mins => $5))`,
+		if _, err = db.ExecContext(ctx, `INSERT INTO community.topics(id,board_code,author_id,author_name,title,body,created_at,updated_at,last_activity_at)
+			VALUES($1,$2,$3,'tester',$4,'body',now(),now(),now() - make_interval(mins => $5))`,
 			uuid.NewString(), probeBoard, probeUser, fmt.Sprintf("分页窗口-主题-%d", i), i); err != nil {
 			t.Fatalf("插入主题 %d: %v", i, err)
 		}

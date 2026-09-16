@@ -111,7 +111,6 @@ type topicRow struct {
 	AuthorName   string         `json:"author_name"`
 	Title        string         `json:"title"`
 	Body         string         `json:"content"`
-	Language     string         `json:"language"`
 	EntityID     sql.NullString `json:"-"`
 	IsPinned     bool           `json:"is_pinned"`
 	IsLocked     bool           `json:"is_locked"`
@@ -126,7 +125,7 @@ func (t topicRow) toMap() map[string]any {
 	out := map[string]any{
 		"id": t.ID, "board_code": t.BoardCode, "user_id": t.AuthorID,
 		"author_name": t.AuthorName, "title": t.Title, "content": t.Body,
-		"language": t.Language, "is_pinned": t.IsPinned, "is_locked": t.IsLocked,
+		"is_pinned": t.IsPinned, "is_locked": t.IsLocked,
 		"view_count": t.ViewCount, "reply_count": t.ReplyCount,
 		"created_at": t.CreatedAt, "updated_at": t.UpdatedAt,
 		"last_activity_at": t.LastActivity,
@@ -138,11 +137,12 @@ func (t topicRow) toMap() map[string]any {
 	return out
 }
 
-const topicCols = `t.id::text,t.board_code,t.author_id::text,COALESCE(NULLIF(t.author_name,''),'Anonymous'),t.title,t.body,t.language,t.entity_id::text,t.is_pinned,t.is_locked,t.view_count,t.reply_count,t.created_at,t.updated_at,t.last_activity_at`
+// 主题不再带语言维度（language 列已在 migrations/000003 退役，接口也不再接受语言筛选）。
+const topicCols = `t.id::text,t.board_code,t.author_id::text,COALESCE(NULLIF(t.author_name,''),'Anonymous'),t.title,t.body,t.entity_id::text,t.is_pinned,t.is_locked,t.view_count,t.reply_count,t.created_at,t.updated_at,t.last_activity_at`
 
 func scanTopic(rows *sql.Rows) (topicRow, error) {
 	var t topicRow
-	err := rows.Scan(&t.ID, &t.BoardCode, &t.AuthorID, &t.AuthorName, &t.Title, &t.Body, &t.Language,
+	err := rows.Scan(&t.ID, &t.BoardCode, &t.AuthorID, &t.AuthorName, &t.Title, &t.Body,
 		&t.EntityID, &t.IsPinned, &t.IsLocked, &t.ViewCount, &t.ReplyCount, &t.CreatedAt, &t.UpdatedAt, &t.LastActivity)
 	return t, err
 }
@@ -233,10 +233,8 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			args = append(args, commentBoard)
 			where = append(where, fmt.Sprintf("t.board_code<>$%d", len(args)))
 		}
-		if lang := strings.TrimSpace(c.Query("language")); lang != "" && lang != "all" {
-			args = append(args, lang)
-			where = append(where, fmt.Sprintf("t.language=$%d", len(args)))
-		}
+		// ?language= 已于 2026-09-17 退役（论坛内容不再带语言维度）：旧前端可能仍在传，
+		// 这里刻意**忽略而不报错**，避免老客户端在某次部署后整页 400。
 		if q := strings.TrimSpace(c.Query("q")); q != "" {
 			args = append(args, "%"+q+"%")
 			where = append(where, fmt.Sprintf("(t.title ILIKE $%d OR t.body ILIKE $%d)", len(args), len(args)))
@@ -377,14 +375,14 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 	// 发主题需要 community.post.create（member 组默认持有；自定义组没给该码就不能发帖）。
 	api.POST("/community/topics", h.require(auth.PermissionPostCreate), func(c *gin.Context) {
 		var in struct {
-			BoardCode string   `json:"board_code"`
-			Title     string   `json:"title"`
-			Content   string   `json:"content"`
-			Language  string   `json:"language"`
-			WorkID    string   `json:"work_id"`
-			EntityID  string   `json:"entity_id"`
-			TagIDs    []int64  `json:"tag_ids"`
-			TagNames  []string `json:"tag_names"`
+			BoardCode string `json:"board_code"`
+			Title     string `json:"title"`
+			Content   string `json:"content"`
+			// 旧前端可能仍传 language：不再落库，也不报错（论坛内容不再带语言维度）。
+			WorkID   string   `json:"work_id"`
+			EntityID string   `json:"entity_id"`
+			TagIDs   []int64  `json:"tag_ids"`
+			TagNames []string `json:"tag_names"`
 		}
 		if !body(c, &in) {
 			return
@@ -428,9 +426,9 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			entity = entityID
 		}
 		if _, err = tx.ExecContext(c.Request.Context(), `
-			INSERT INTO community.topics(id,board_code,author_id,author_name,title,body,language,entity_id)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-			tid, in.BoardCode, p.ID, authorName(p), in.Title, in.Content, in.Language, entity); err != nil {
+			INSERT INTO community.topics(id,board_code,author_id,author_name,title,body,entity_id)
+			VALUES($1,$2,$3,$4,$5,$6,$7)`,
+			tid, in.BoardCode, p.ID, authorName(p), in.Title, in.Content, entity); err != nil {
 			fail(c, 500, "module_error")
 			return
 		}

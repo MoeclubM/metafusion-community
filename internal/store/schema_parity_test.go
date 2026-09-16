@@ -32,7 +32,6 @@ var frozenTableDefs = map[string]map[string]string{
 		"author_name":      "author_name text not null default ''",
 		"title":            "title text not null",
 		"body":             "body text not null",
-		"language":         "language text not null default ''",
 		"entity_id":        "entity_id uuid",
 		"is_pinned":        "is_pinned boolean not null default false",
 		"is_locked":        "is_locked boolean not null default false",
