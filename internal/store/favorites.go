@@ -33,12 +33,17 @@ type Favorite struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// KindFor 校验目标类型并返回对应的实体 kind；未知类型返回错误。
+// ErrInvalidTargetType 表示收藏目标类型不在固定八种实体骨架里。
+// 它是**调用方输入错误**（400），必须与数据库故障区分开：HTTP 层此前把
+// err.Error() 直接当作错误码回给客户端，数据库报错（含 SQL 片段）因此外泄。
+var ErrInvalidTargetType = errors.New("invalid_target_type")
+
+// KindFor 校验目标类型并返回对应的实体 kind；未知类型返回 ErrInvalidTargetType。
 func KindFor(targetType string) (string, error) {
 	if kind, ok := FavoriteKinds[strings.TrimSpace(targetType)]; ok {
 		return kind, nil
 	}
-	return "", errors.New("invalid_target_type")
+	return "", ErrInvalidTargetType
 }
 
 // ToggleFavorite 切换收藏状态并返回切换后是否已收藏。

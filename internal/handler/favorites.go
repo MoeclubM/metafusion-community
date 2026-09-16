@@ -2,10 +2,12 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/MoeclubM/metafusion-community/internal/store"
 )
@@ -71,7 +73,7 @@ func (h *Handler) registerFavorites(api *gin.RouterGroup) {
 		}
 		v, err := h.store.FavoriteStatus(c.Request.Context(), p.ID, c.Query("target_type"), ids)
 		if err != nil {
-			fail(c, 400, err.Error())
+			fail(c, storeErrorStatus(err), storeErrorCode(err))
 			return
 		}
 		c.JSON(200, gin.H{"favorited": v})
@@ -86,9 +88,34 @@ func (h *Handler) registerFavorites(api *gin.RouterGroup) {
 	// 指定用户收藏列表：公开读，但目标实体仍按请求者可见性过滤；
 	// 不可见或已删除的目标跳过展示，不泄露其存在性。
 	api.GET("/users/:id/favorites", func(c *gin.Context) {
+		// 用户 id 是 uuid 主键：非法字面量按"没有这个人"处理（404），
+		// 不能送进 uuid 列——那只会拿到 pq 的解析错误，再被回显给客户端。
+		ownerID := c.Param("id")
+		if _, err := uuid.Parse(ownerID); err != nil {
+			fail(c, 404, "not_found")
+			return
+		}
 		page, size := favPage(c)
-		h.respondFavorites(c, c.Param("id"), c.Query("target_type"), size, (page-1)*size)
+		h.respondFavorites(c, ownerID, c.Query("target_type"), size, (page-1)*size)
 	})
+}
+
+// storeErrorCode/Status 把仓储层的错误翻成对外错误码与状态：
+// 只有"目标类型不合法"是调用方的输入错误（400 invalid_target_type），
+// 其余（连接断了、列不存在、uuid 解析失败）都是本服务的故障，统一 500 module_error。
+// 直接把 err.Error() 当错误码回给客户端会把数据库原文（含 SQL 片段）吐出去。
+func storeErrorCode(err error) string {
+	if errors.Is(err, store.ErrInvalidTargetType) {
+		return "invalid_target_type"
+	}
+	return "module_error"
+}
+
+func storeErrorStatus(err error) int {
+	if errors.Is(err, store.ErrInvalidTargetType) {
+		return 400
+	}
+	return 500
 }
 
 // respondFavorites 组装收藏列表：本服务只提供自有数据，实体摘要经目录服务透传，
@@ -96,7 +123,7 @@ func (h *Handler) registerFavorites(api *gin.RouterGroup) {
 func (h *Handler) respondFavorites(c *gin.Context, ownerID, targetType string, limit, offset int) {
 	items, total, err := h.store.ListFavorites(c.Request.Context(), ownerID, targetType, limit, offset)
 	if err != nil {
-		fail(c, 400, err.Error())
+		fail(c, storeErrorStatus(err), storeErrorCode(err))
 		return
 	}
 	out := []map[string]any{}

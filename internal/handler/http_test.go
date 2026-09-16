@@ -245,3 +245,21 @@ func TestDeleteEndpointsRejectMalformedIDs(t *testing.T) {
 		}
 	}
 }
+
+// 公开收藏列表的用户 id 是 uuid：非法字面量必须在查库之前按"没有这个人"处理，
+// 否则 pq 的解析错误会被回显给客户端（线上曾返回 400 与整条 SQL 错误原文）。
+func TestUserFavoritesRejectsMalformedOwnerID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	verifier := newVerifier(t, "http://127.0.0.1:1/jwks")
+	r := gin.New()
+	New(&store.Store{}, catalog.New("", 0), verifier).Register(r)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/users/not-a-uuid/favorites", nil))
+	if w.Code != 404 {
+		t.Fatalf("非法用户 id 应 404，实际 %d（%s）", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "pq:") {
+		t.Fatalf("响应不得回显数据库错误：%s", w.Body.String())
+	}
+}

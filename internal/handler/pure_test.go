@@ -1,9 +1,13 @@
 package handler
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/MoeclubM/metafusion-community/internal/auth"
+	"github.com/MoeclubM/metafusion-community/internal/store"
 )
 
 // 标签 slug 是标签的身份：同名标签必须得到同一个 slug，大小写与空白不产生新标签。
@@ -51,5 +55,31 @@ func TestCommentBoardExcludedFromFeed(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("默认板块缺少评论板块")
+	}
+}
+
+// 仓储层错误到 HTTP 的映射：只有"目标类型不合法"是 400，
+// 其余一律 500 module_error —— 数据库原文绝不能冒充错误码回给客户端。
+func TestStoreErrorMapping(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"目标类型不合法", store.ErrInvalidTargetType, 400, "invalid_target_type"},
+		{"包装后的目标类型不合法", fmt.Errorf("wrap: %w", store.ErrInvalidTargetType), 400, "invalid_target_type"},
+		{"数据库故障", errors.New(`pq: invalid input syntax for type uuid: "x" (22P02)`), 500, "module_error"},
+	}
+	for _, tc := range cases {
+		if got := storeErrorStatus(tc.err); got != tc.status {
+			t.Fatalf("%s 状态码 = %d，期望 %d", tc.name, got, tc.status)
+		}
+		if got := storeErrorCode(tc.err); got != tc.code {
+			t.Fatalf("%s 错误码 = %q，期望 %q", tc.name, got, tc.code)
+		}
+		if code := storeErrorCode(tc.err); strings.Contains(code, "pq:") {
+			t.Fatalf("%s 错误码回显了数据库原文：%q", tc.name, code)
+		}
 	}
 }
