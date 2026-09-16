@@ -263,3 +263,29 @@ func TestUserFavoritesRejectsMalformedOwnerID(t *testing.T) {
 		t.Fatalf("响应不得回显数据库错误：%s", w.Body.String())
 	}
 }
+
+// 写接口的请求体统一走 body()：超过 2MB 直接 400，不能把整份载荷读进来
+// （网关给的上限是 1G，服务侧不收口就等于没有上限）。
+func TestTopicCreateRejectsOversizedBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv, kid := jwksServer(t, key)
+	verifier := newVerifier(t, srv.URL)
+	r := gin.New()
+	New(&store.Store{}, catalog.New("", 0), verifier).Register(r)
+
+	// 载荷超限但字段本身都合法：这样"返回 400"只能由 body() 的体积上限解释，
+	// 而不是被标题/正文长度校验顺带拦下。
+	big := `{"board_code":"casual","title":"x","content":"ok","padding":"` + strings.Repeat("a", 3<<20) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/community/topics", strings.NewReader(big))
+	req.Header.Set("Authorization", "Bearer "+signToken(t, key, kid, "user"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_payload") {
+		t.Fatalf("超限请求体应 400 invalid_payload，实际 %d（%s）", w.Code, w.Body.String())
+	}
+}

@@ -146,8 +146,7 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 		var in struct {
 			Body string `json:"body"`
 		}
-		if c.ShouldBindJSON(&in) != nil || len(strings.TrimSpace(in.Body)) == 0 || len(in.Body) > 20000 {
-			fail(c, 400, "invalid_payload")
+		if !body(c, &in) || len(strings.TrimSpace(in.Body)) == 0 || len(in.Body) > 20000 {
 			return
 		}
 		p := h.principal(c)
@@ -291,8 +290,7 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 			Progress string `json:"progress"`
 			Owned    bool   `json:"owned"`
 		}
-		if c.ShouldBindJSON(&in) != nil || in.Rating < 0 || in.Rating > 10 || len(in.Progress) > 1000 {
-			fail(c, 400, "invalid_payload")
+		if !body(c, &in) || in.Rating < 0 || in.Rating > 10 || len(in.Progress) > 1000 {
 			return
 		}
 		b, _ := json.Marshal(in)

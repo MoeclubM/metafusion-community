@@ -64,7 +64,9 @@ func fail(c *gin.Context, status int, code string) {
 	c.JSON(status, gin.H{"error": code})
 }
 
-// body 统一写接口的请求解析：2MB 上限，拒绝未知字段，错误码与主仓库一致。
+// body 统一写接口的请求解析：2MB 上限，错误码与主仓库一致。
+// 上限是必须的——网关的 client_max_body_size 是 1G，没有它一个写请求就能让本服务
+// 把整份载荷读进内存；字段集合由各请求结构体决定（gin 默认忽略未知字段）。
 func body(c *gin.Context, v any) bool {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 2<<20)
 	if err := c.ShouldBindJSON(v); err != nil {

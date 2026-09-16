@@ -406,8 +406,7 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			TagIDs    []int64  `json:"tag_ids"`
 			TagNames  []string `json:"tag_names"`
 		}
-		if c.ShouldBindJSON(&in) != nil {
-			fail(c, 400, "invalid_payload")
+		if !body(c, &in) {
 			return
 		}
 		in.Title = strings.TrimSpace(in.Title)
