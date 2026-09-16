@@ -22,7 +22,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/community/boards` | 匿名 | 板块列表（后台可增删改） |
+| GET | `/api/community/boards` | 匿名 | 板块列表（本服务没有板块管理写接口，板块由种子与运营直改库维护） |
 | GET | `/api/community/topics` | 匿名 | 主题列表：板块/标签/语言/关键词筛选、置顶优先、分页 |
 | GET | `/api/community/topic-tags` | 匿名 | 标签清单（`[{id,name}]`，供前端按 id 筛选） |
 | GET | `/api/community/topics/{id}` | 匿名 | 主题详情（含回复、标签、锚定实体题名）；浏览量自增 |
@@ -79,6 +79,10 @@ go run cmd/migrate -direction back
 
 两个方向都存在，切流才是真的可回滚：**先搬数据再改网关**，否则回滚窗口内的新帖在单体侧会"消失"。
 完整步骤与逐步验证见主仓库 [docs/architecture/cutover-runbook.md](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/cutover-runbook.md)。
+
+工具只对**尚未 retire 的实例**有意义：开发实例已于 2026-09-14 执行
+`deploy/sql/retire-legacy-schemas.sql`（`modules` schema 与 `catalog.favorites` 已删除），
+在那台实例上两个方向都会因源表/目标表不存在而失败，回滚只剩"改网关上游 + 上一版镜像重建"。
 
 - 幂等：全部 `ON CONFLICT DO NOTHING`，失败重跑安全；
 - **只读旧表**：不删除、不修改 `modules.*`，因此切流前随时可以取消，回滚只需把网关指回单体；
