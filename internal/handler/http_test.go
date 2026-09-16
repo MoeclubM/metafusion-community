@@ -214,3 +214,34 @@ func TestAuthBoundaryBeforeDatabase(t *testing.T) {
 		}
 	}
 }
+
+// 删除接口的 uuid 校验必须发生在查库之前：非法字面量回 404，
+// 既不是 500（pq 解析错误被兜成 500），也不能靠空库 panic 混过去。
+func TestDeleteEndpointsRejectMalformedIDs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv, kid := jwksServer(t, key)
+	verifier := newVerifier(t, srv.URL)
+	r := gin.New()
+	New(&store.Store{}, catalog.New("", 0), verifier).Register(r)
+
+	token := signTokenWith(t, key, kid, testSubject, "user",
+		[]string{"community_moderator"}, []string{auth.PermissionPostModerate})
+	for _, path := range []string{
+		"/api/community/topics/not-a-uuid",
+		"/api/community/topics/not-a-uuid/posts/" + uuid.NewString(),
+		"/api/community/topics/" + uuid.NewString() + "/posts/not-a-uuid",
+		"/api/community/posts/not-a-uuid",
+	} {
+		req := httptest.NewRequest(http.MethodDelete, path, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != 404 {
+			t.Fatalf("DELETE %s 非法 id 应 404，实际 %d（%s）", path, w.Code, w.Body.String())
+		}
+	}
+}

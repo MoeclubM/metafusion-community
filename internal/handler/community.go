@@ -171,17 +171,28 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 
 	// 评论删除：只作用于评论板块，避免仅凭 id 误删论坛主题。
 	api.DELETE("/community/posts/:id", h.guard(true), func(c *gin.Context) {
+		id := c.Param("id")
+		if _, err := uuid.Parse(id); err != nil {
+			fail(c, 404, "not_found")
+			return
+		}
 		p := h.principal(c)
 		query := "DELETE FROM community.topics WHERE id=$1 AND board_code=$2 AND author_id=$3"
-		args := []any{c.Param("id"), commentBoard, p.ID}
+		args := []any{id, commentBoard, p.ID}
 		// 短评与帖子同属"内容治理"：删他人的短评用 community.post.moderate（原判据是 admin 角色）。
 		if p.Can(auth.PermissionPostModerate) {
 			query = "DELETE FROM community.topics WHERE id=$1 AND board_code=$2"
 			args = args[:2]
 		}
-		_, err := h.db.ExecContext(c.Request.Context(), query, args...)
+		res, err := h.db.ExecContext(c.Request.Context(), query, args...)
 		if err != nil {
 			fail(c, 500, "module_error")
+			return
+		}
+		// 没删到行（不存在、不是评论板块、或不是本人且无治理码）必须回 404：
+		// 恒回 {"ok":true} 会让调用方以为越权删除成功了，与主题/回复删除的口径也不一致。
+		if n, _ := res.RowsAffected(); n == 0 {
+			fail(c, 404, "not_found")
 			return
 		}
 		c.JSON(200, gin.H{"ok": true})
