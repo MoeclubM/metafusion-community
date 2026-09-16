@@ -3,7 +3,6 @@ package handler
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -302,5 +301,3 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 		c.JSON(200, in)
 	})
 }
-
-var _ = errors.Is

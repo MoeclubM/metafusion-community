@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -50,11 +49,11 @@ func KindFor(targetType string) (string, error) {
 // 主键 (user_id,target_type,target_id) 保证并发下不会重复收藏：
 // 先删命中即取消，未命中再插入，两步在同一事务内完成。
 func (s *Store) ToggleFavorite(ctx context.Context, userID, targetType, targetID string) (bool, error) {
-	kind, err := KindFor(targetType)
-	if err != nil {
+	// kind 不需要回传给 SQL：target_type 本身就是 kind 的键，取值合法性
+	// 由 community.favorites 的 CHECK 约束兜底（见 store.go 的 target_type CHECK）。
+	if _, err := KindFor(targetType); err != nil {
 		return false, err
 	}
-	_ = kind
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -142,5 +141,3 @@ func (s *Store) ListFavorites(ctx context.Context, ownerID, targetType string, l
 	}
 	return items, total, rows.Err()
 }
-
-var _ = sql.ErrNoRows
