@@ -86,13 +86,29 @@ func TestForumEndpointsAgainstPostgres(t *testing.T) {
 		return w, out
 	}
 
-	// 1) 板块列表：种子必须生效且包含评论板块。
-	w, boards := call(http.MethodGet, "/api/community/boards", "", "")
+	// 1) 板块列表：接口给前端的是**裸数组**（forum.go 的 c.JSON(200, boards)，前端 fetchBoards
+	// 按 any[] 解析），不是 {"items": [...]}。种子必须生效，且包含发主题要用的 qa 与承载评论的 comment。
+	w, _ := call(http.MethodGet, "/api/community/boards", "", "")
 	if w.Code != 200 {
 		t.Fatalf("板块列表 HTTP %d: %s", w.Code, w.Body.String())
 	}
-	if items, _ := boards["items"].([]any); len(items) == 0 {
-		t.Fatalf("板块列表为空: %s", w.Body.String())
+	var boards []struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &boards); err != nil {
+		t.Fatalf("板块列表应为裸数组: %v %s", err, w.Body.String())
+	}
+	if len(boards) != len(defaultBoards) {
+		t.Fatalf("板块列表条数 = %d，期望种子播种的 %d 个: %s", len(boards), len(defaultBoards), w.Body.String())
+	}
+	codes := map[string]bool{}
+	for _, b := range boards {
+		codes[b.Code] = true
+	}
+	for _, want := range []string{"qa", commentBoard} {
+		if !codes[want] {
+			t.Fatalf("板块列表缺少种子板块 %s: %s", want, w.Body.String())
+		}
 	}
 
 	// 2) 发主题（带实体锚点与标签）。
