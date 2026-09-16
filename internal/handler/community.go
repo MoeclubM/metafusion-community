@@ -21,10 +21,7 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 	// 条目元信息经目录接口批量获取，不直接 JOIN 目录表（解耦边界）。
 	// 支持 sort=recent（默认，最新在前）/ oldest；entity_id 限定单个条目；q 匹配正文或条目标题。
 	api.GET("/community/feed", h.guard(false), func(c *gin.Context) {
-		limit, _ := strconv.Atoi(c.Query("limit"))
-		if limit <= 0 || limit > 100 {
-			limit = 50
-		}
+		limit, _ := pagingLimitOffset(c, 50)
 		args := []any{commentBoard}
 		where := []string{"t.board_code = $1"}
 		// entity_id 必须是合法 UUID，否则直接判为空结果，而不是把非法字面量送进查询。

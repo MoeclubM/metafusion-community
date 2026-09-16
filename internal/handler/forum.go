@@ -235,14 +235,7 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 	})
 
 	api.GET("/community/topics", h.guard(false), func(c *gin.Context) {
-		limit, _ := strconv.Atoi(c.Query("limit"))
-		if limit <= 0 || limit > 100 {
-			limit = 30
-		}
-		offset, _ := strconv.Atoi(c.Query("offset"))
-		if offset < 0 {
-			offset = 0
-		}
+		limit, offset := pagingLimitOffset(c, 30)
 		args := []any{}
 		where := []string{"1=1"}
 		// 评论与主题共用存储但语义不同：默认只列"主题"（排除评论板块），

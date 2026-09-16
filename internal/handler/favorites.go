@@ -3,7 +3,6 @@ package handler
 import (
 	"encoding/json"
 	"errors"
-	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -15,19 +14,7 @@ import (
 // registerFavorites 挂载收藏与收藏列表。收藏是用户行为，属互动系统，不属目录元数据；
 // 路径与分页口径与主仓库 catalog 的 /favorites/* 逐字一致，切流时前端零改动。
 func (h *Handler) registerFavorites(api *gin.RouterGroup) {
-	// 分页约定（与主仓库一致的静默收敛口径）：page<1 收敛为 1；
-	// page_size 越界（<1 或 >100）收敛为 20，不硬拒绝，避免翻页参数抖动直接 400。
-	favPage := func(c *gin.Context) (int, int) {
-		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-		size, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-		if page < 1 {
-			page = 1
-		}
-		if size < 1 || size > 100 {
-			size = 20
-		}
-		return page, size
-	}
+	// 分页走 page/page_size 写法（口径、换算与兼容期见 paging.go）。
 
 	// 收藏切换需登录、不限管理员：普通用户与编辑均可收藏可见实体。
 	api.POST("/favorites/toggle", h.guard(true), func(c *gin.Context) {
@@ -81,8 +68,8 @@ func (h *Handler) registerFavorites(api *gin.RouterGroup) {
 
 	// 我的收藏需登录：普通用户可列出自己的收藏。
 	api.GET("/favorites/mine", h.guard(true), func(c *gin.Context) {
-		page, size := favPage(c)
-		h.respondFavorites(c, h.principal(c).ID, c.Query("target_type"), size, (page-1)*size)
+		limit, offset := pagingPageSize(c, 20)
+		h.respondFavorites(c, h.principal(c).ID, c.Query("target_type"), limit, offset)
 	})
 
 	// 指定用户收藏列表：公开读，但目标实体仍按请求者可见性过滤；
@@ -95,8 +82,8 @@ func (h *Handler) registerFavorites(api *gin.RouterGroup) {
 			fail(c, 404, "not_found")
 			return
 		}
-		page, size := favPage(c)
-		h.respondFavorites(c, ownerID, c.Query("target_type"), size, (page-1)*size)
+		limit, offset := pagingPageSize(c, 20)
+		h.respondFavorites(c, ownerID, c.Query("target_type"), limit, offset)
 	})
 }
 
