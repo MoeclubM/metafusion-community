@@ -137,7 +137,6 @@ func (t topicRow) toMap() map[string]any {
 	return out
 }
 
-// 主题不再带语言维度（language 列已在 migrations/000003 退役，接口也不再接受语言筛选）。
 const topicCols = `t.id::text,t.board_code,t.author_id::text,COALESCE(NULLIF(t.author_name,''),'Anonymous'),t.title,t.body,t.entity_id::text,t.is_pinned,t.is_locked,t.view_count,t.reply_count,t.created_at,t.updated_at,t.last_activity_at`
 
 func scanTopic(rows *sql.Rows) (topicRow, error) {
@@ -233,8 +232,6 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			args = append(args, commentBoard)
 			where = append(where, fmt.Sprintf("t.board_code<>$%d", len(args)))
 		}
-		// ?language= 已于 2026-09-17 退役（论坛内容不再带语言维度）：旧前端可能仍在传，
-		// 这里刻意**忽略而不报错**，避免老客户端在某次部署后整页 400。
 		if q := strings.TrimSpace(c.Query("q")); q != "" {
 			args = append(args, "%"+q+"%")
 			where = append(where, fmt.Sprintf("(t.title ILIKE $%d OR t.body ILIKE $%d)", len(args), len(args)))
@@ -375,14 +372,13 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 	// 发主题需要 community.post.create（member 组默认持有；自定义组没给该码就不能发帖）。
 	api.POST("/community/topics", h.require(auth.PermissionPostCreate), func(c *gin.Context) {
 		var in struct {
-			BoardCode string `json:"board_code"`
-			Title     string `json:"title"`
-			Content   string `json:"content"`
-			// 旧前端可能仍传 language：不再落库，也不报错（论坛内容不再带语言维度）。
-			WorkID   string   `json:"work_id"`
-			EntityID string   `json:"entity_id"`
-			TagIDs   []int64  `json:"tag_ids"`
-			TagNames []string `json:"tag_names"`
+			BoardCode string   `json:"board_code"`
+			Title     string   `json:"title"`
+			Content   string   `json:"content"`
+			WorkID    string   `json:"work_id"`
+			EntityID  string   `json:"entity_id"`
+			TagIDs    []int64  `json:"tag_ids"`
+			TagNames  []string `json:"tag_names"`
 		}
 		if !body(c, &in) {
 			return

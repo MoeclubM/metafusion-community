@@ -23,7 +23,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
 | GET | `/api/community/boards` | 匿名 | 板块列表 |
-| GET | `/api/community/topics` | 匿名 | 主题列表：板块/标签/关键词筛选、置顶优先、分页（`language` 参数收到即忽略） |
+| GET | `/api/community/topics` | 匿名 | 主题列表：板块/标签/关键词筛选、置顶优先、分页 |
 | GET | `/api/community/topic-tags` | 匿名 | 标签清单（`[{id,name}]`，供前端按 id 筛选） |
 | GET | `/api/community/topics/{id}` | 匿名 | 主题详情（含回复、标签、锚定实体题名）；浏览量自增 |
 | POST | `/api/community/topics` | `community.post.create` | 发主题（可锚定实体、可带标签） |
@@ -47,10 +47,6 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 论坛主题与"实体短评"共用同一张 `community.topics`，靠板块区分语义：评论锚定实体、无独立标题、不进信息流；
 主题有标题、可独立成文、进信息流（`show_in_feed`）。
-
-**论坛内容不带语言维度**（2026-09-17 起）：板块名/描述是单一字段（`community.boards.name` / `description`），
-主题没有 `language` 字段（`migrations/000003` 已删列），`GET /api/community/topics` 的 `?language=` 与发帖体里的 `language`
-都只被**忽略**、不报错。站点 UI 自身的多语（`useI18n` 四语字典）不受影响。
 
 ## 权限
 
