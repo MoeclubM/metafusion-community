@@ -64,6 +64,10 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 ## 数据与迁移
 
+**结构由版本化迁移管理**：`migrations/*.up.sql` 是 `community` schema 的唯一结构来源，服务启动时按版本应用
+（已应用则跳过，登记在 `community.schema_migrations`），重复启动不会改动已存在的表；
+下面的一次性工具只搬数据、不管结构。
+
 本服务拥有 `community` schema，表结构与主仓库 `modules` 包中的 `forum_*` / `records` **逐列一致**，
 因此切流前可用附带的一次性导入工具搬运数据，不需要字段映射：
 

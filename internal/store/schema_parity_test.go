@@ -149,7 +149,7 @@ func parseSchema(t *testing.T, ddl string) map[string]map[string]string {
 
 // 建表语句必须与老表逐列一致：搬运的 SQL、双向导入工具都依赖这一点。
 func TestSchemaMatchesLegacyTableShape(t *testing.T) {
-	parsed := parseSchema(t, schema)
+	parsed := parseSchema(t, schemaDDL(t))
 	for table, want := range frozenTableDefs {
 		got, ok := parsed[table]
 		if !ok {

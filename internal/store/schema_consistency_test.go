@@ -12,7 +12,7 @@ import (
 // 只在第一次真实写入时才暴露，因此用一条静态用例把它钉住。
 func TestSchemaFavoriteKindsMatchCode(t *testing.T) {
 	re := regexp.MustCompile(`target_type text NOT NULL CHECK \(target_type IN \(([^)]*)\)\)`)
-	match := re.FindStringSubmatch(schema)
+	match := re.FindStringSubmatch(schemaDDL(t))
 	if match == nil {
 		t.Fatal("storage schema 中找不到 favorites.target_type 的 CHECK 约束")
 	}
