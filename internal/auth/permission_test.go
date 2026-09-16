@@ -48,8 +48,8 @@ func TestCanHonoursWildcard(t *testing.T) {
 	}
 }
 
-// 兼容：老令牌（没有 permissions 声明）与尚未按权限组配置的实例按角色兜底 ——
-// admin 放行本服务全部码，其它角色与匿名不放行，边界与本服务改造前一致。
+// 兼容：老令牌（没有 permissions 声明）与尚未按权限组配置的实例按历史边界兜底 ——
+// 治理类码只认 admin；发帖码是收口前的"登录即可"，非 admin 角色仍可发（见 legacyOpenCodes）。
 func TestCanFallsBackToRoleForLegacyTokens(t *testing.T) {
 	legacyAdmin := &Principal{ID: "u-5", Username: "kana", Role: "admin"}
 	for _, code := range communityPermissionCodes {
@@ -63,19 +63,23 @@ func TestCanFallsBackToRoleForLegacyTokens(t *testing.T) {
 			t.Fatalf("角色兜底不得放行非本服务权限码：%s", foreign)
 		}
 	}
+	// 非 admin 的老令牌：能发帖（收口前任何登录用户都能发），但不能治理、置顶或改板块。
 	for _, role := range []string{"editor", "user", ""} {
 		p := &Principal{ID: "u-6", Role: role}
-		for _, code := range communityPermissionCodes {
+		if !p.Can(PermissionPostCreate) {
+			t.Fatalf("角色 %q 的老令牌应能发帖：收口前发帖只要求登录", role)
+		}
+		for _, code := range []string{PermissionPostModerate, PermissionTopicPin, PermissionBoardManage} {
 			if p.Can(code) {
 				t.Fatalf("角色 %q 的老令牌不得凭角色放行 %s", role, code)
 			}
 		}
 	}
-	if (&Principal{}).Can(PermissionPostModerate) {
-		t.Fatal("没有任何权限与角色的令牌不得放行")
+	if (&Principal{ID: "u-7", Role: "user", Permissions: []string{}}).Can(PermissionPostModerate) {
+		t.Fatal("没有任何权限的老令牌不得放行治理码")
 	}
 	var anon *Principal
-	if anon.Can(PermissionPostModerate) {
+	if anon.Can(PermissionPostCreate) || anon.Can(PermissionPostModerate) {
 		t.Fatal("匿名（nil）不得放行")
 	}
 }

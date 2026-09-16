@@ -388,7 +388,8 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 		c.JSON(200, out)
 	})
 
-	api.POST("/community/topics", h.guard(true), func(c *gin.Context) {
+	// 发主题需要 community.post.create（member 组默认持有；自定义组没给该码就不能发帖）。
+	api.POST("/community/topics", h.require(auth.PermissionPostCreate), func(c *gin.Context) {
 		var in struct {
 			BoardCode string   `json:"board_code"`
 			Title     string   `json:"title"`
@@ -470,7 +471,8 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 		})
 	})
 
-	api.POST("/community/topics/:id/posts", h.guard(true), func(c *gin.Context) {
+	// 回帖与发主题同一权限码：能发帖就能回帖，二者不拆开。
+	api.POST("/community/topics/:id/posts", h.require(auth.PermissionPostCreate), func(c *gin.Context) {
 		topicID := c.Param("id")
 		if _, err := uuid.Parse(topicID); err != nil {
 			fail(c, 404, "not_found")
@@ -628,6 +630,49 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			return
 		}
 		c.JSON(200, gin.H{"ok": true})
+	})
+
+	// 置顶 / 取消置顶：运营动作，需要 community.topic.pin（member 与普通编辑都不持有）。
+	// 只写既有的 is_pinned 列，响应沿用主题列表/详情的形状，前端不需要另写一套解析。
+	api.PUT("/community/topics/:id/pin", h.require(auth.PermissionTopicPin), func(c *gin.Context) {
+		topicID := c.Param("id")
+		if _, err := uuid.Parse(topicID); err != nil {
+			fail(c, 404, "not_found")
+			return
+		}
+		var in struct {
+			Pinned *bool `json:"pinned"`
+		}
+		if !body(c, &in) {
+			return
+		}
+		// 指针而非 bool：缺字段与 false 不可区分，静默按 false 会让"漏传的调用"变成取消置顶。
+		if in.Pinned == nil {
+			fail(c, 400, "invalid_payload")
+			return
+		}
+		// 评论不是文章（与主题详情同一口径）：不给评论板块的条目置顶。
+		rows, err := h.db.QueryContext(c.Request.Context(),
+			`UPDATE community.topics t SET is_pinned=$2, updated_at=now() WHERE t.id=$1 AND t.board_code<>$3 RETURNING `+topicCols,
+			topicID, *in.Pinned, commentBoard)
+		if err != nil {
+			fail(c, 500, "module_error")
+			return
+		}
+		if !rows.Next() {
+			rows.Close()
+			fail(c, 404, "not_found")
+			return
+		}
+		t, err := scanTopic(rows)
+		rows.Close()
+		if err != nil {
+			fail(c, 500, "module_error")
+			return
+		}
+		out := t.toMap()
+		attachTopicEntities(c.Request.Context(), h, []map[string]any{out})
+		c.JSON(200, out)
 	})
 }
 

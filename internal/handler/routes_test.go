@@ -15,6 +15,9 @@ import (
 // frozenRoutes 是切流契约：这些路径与主仓库 modules/catalog 包**逐字一致**，
 // 前端与第三方客户端在切流时不需要任何改动。这个测试是"契约冻结"的执行者——
 // 任何人改动路由都会在这里失败，而不是等线上 404 才发现。
+//
+// 例外：本服务新增的两条运营写接口（置顶、板块配置）在主仓库里**没有对应实现**，
+// 它们是本次把"已声明但没落地的权限码"补成真实能力时新增的，不是切流契约的一部分。
 var frozenRoutes = []string{
 	"DELETE /api/community/posts/:id",
 	"DELETE /api/community/topics/:id",
@@ -35,6 +38,8 @@ var frozenRoutes = []string{
 	"POST /api/community/topics",
 	"POST /api/community/topics/:id/posts",
 	"POST /api/favorites/toggle",
+	"PUT /api/community/boards/:code",
+	"PUT /api/community/topics/:id/pin",
 	"PUT /api/records/entities/:id",
 }
 

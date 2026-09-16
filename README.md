@@ -22,19 +22,21 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/community/boards` | 匿名 | 板块列表（本服务没有板块管理写接口，板块由种子与运营直改库维护） |
+| GET | `/api/community/boards` | 匿名 | 板块列表 |
 | GET | `/api/community/topics` | 匿名 | 主题列表：板块/标签/语言/关键词筛选、置顶优先、分页 |
 | GET | `/api/community/topic-tags` | 匿名 | 标签清单（`[{id,name}]`，供前端按 id 筛选） |
 | GET | `/api/community/topics/{id}` | 匿名 | 主题详情（含回复、标签、锚定实体题名）；浏览量自增 |
-| POST | `/api/community/topics` | 登录 | 发主题（可锚定实体、可带标签） |
-| POST | `/api/community/topics/{id}/posts` | 登录 | 回帖（`post_number` 楼层、可引用楼号） |
+| POST | `/api/community/topics` | `community.post.create` | 发主题（可锚定实体、可带标签） |
+| POST | `/api/community/topics/{id}/posts` | `community.post.create` | 回帖（`post_number` 楼层、可引用楼号） |
 | DELETE | `/api/community/topics/{id}` | 作者 / `community.post.moderate` | 删主题（级联回复） |
 | DELETE | `/api/community/topics/{id}/posts/{postId}` | 作者 / `community.post.moderate` | 删回复 |
 | GET | `/api/community/feed` | 匿名 | 站点级评论流（跨实体聚合，带条目标题；`q` 有界窗口过滤） |
 | GET | `/api/community/entities/{id}/posts` | 匿名 | 某实体下的短评 |
-| POST | `/api/community/entities/{id}/posts` | 登录 | 发表短评 |
+| POST | `/api/community/entities/{id}/posts` | `community.post.create` | 发表短评 |
 | GET | `/api/community/posts/{id}` | 匿名 | 单条短评（稳定 permalink） |
 | DELETE | `/api/community/posts/{id}` | 作者 / `community.post.moderate` | 删短评（仅评论板块） |
+| PUT | `/api/community/topics/{id}/pin` | `community.topic.pin` | 置顶 / 取消置顶（`{pinned: bool}`，写 `is_pinned`；评论板块的条目不可置顶） |
+| PUT | `/api/community/boards/{code}` | `community.board.manage` | 板块配置：`names` / `descriptions`（四语 map）、`color`、`icon`、`sort_order`、`is_enabled`、`show_in_feed`；只改传入字段，`code` 不可改，不提供新增与删除板块 |
 | GET | `/api/community/entities/{id}/collections` | 匿名 | 关联的合集（经目录关系接口，不 JOIN 目录表） |
 | POST | `/api/favorites/toggle` | 登录 | 切换收藏（目标必须是可见实体，且 kind 与 `target_type` 相符） |
 | GET | `/api/favorites/status` | 匿名 | 批量查询收藏状态（未登录返回空集合） |
@@ -54,13 +56,15 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 | 权限码 | 本服务用在哪 |
 | --- | --- |
+| `community.post.create` | 发主题、回帖、短评三处写接口的闸门（member 组默认持有） |
 | `community.post.moderate` | 删除**他人**的主题、回复与短评（作者删自己的内容不需要任何码） |
-| `community.post.create` | 发主题/回帖/短评。写接口当前只要求登录，尚未按码收口（member 组持有该码） |
-| `community.topic.pin` / `community.board.manage` | 已声明，本服务暂无置顶与板块管理写接口 |
+| `community.topic.pin` | 置顶 / 取消置顶主题（`PUT /api/community/topics/{id}/pin`） |
+| `community.board.manage` | 板块配置（`PUT /api/community/boards/{code}`） |
 
-**兼容策略**：令牌**完全没有** `permissions` 声明时（老令牌，或尚未按权限组配置的实例）按历史角色兜底：
-`role=admin` 放行本服务全部码，其它角色与匿名不放行——边界与改造前一致；令牌一旦带 `permissions` 就只认码，
-角色不再额外放行，避免「角色兜底」变成绕过权限组的后门。
+**兼容策略**：令牌**完全没有** `permissions` 声明时（老令牌，或尚未按权限组配置的实例）按历史边界兜底：
+发帖类码（`community.post.create`）放行——收口前发帖只要求登录，账号服务尚未升级的实例不能因为收口而变成
+"除了管理员谁都不能发帖"；治理类码（moderate / pin / board.manage）只认 `role=admin`，与改造前一致。
+令牌一旦带 `permissions` 就只认码，角色不再额外放行，避免「角色兜底」变成绕过权限组的后门。
 
 ## 数据与迁移
 
@@ -111,7 +115,10 @@ go run cmd/migrate -direction back
 
 ```bash
 go run cmd/server/main.go
-go test ./... && go vet ./...
+go vet ./...
+# 带真库的用例共用一个测试库（COMMUNITY_TEST_DSN），包与包之间并行执行会互相清表：
+# 与 CI 一致用 -p 1 串行跑，否则会出现偶发的外键失败。
+COMMUNITY_TEST_DSN='postgres://user:pass@127.0.0.1:5432/metafusion_community_test?sslmode=disable' go test -p 1 ./...
 ```
 
 ## 迁移状态

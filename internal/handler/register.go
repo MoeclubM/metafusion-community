@@ -28,13 +28,14 @@ func New(s *store.Store, cat *catalog.Client, verifier *auth.Verifier) *Handler 
 }
 
 // Register 挂载全部路由。/api 前缀下统一先挂身份中间件：
-// 读接口匿名可用（可见性由目录实体决定），写接口再各自要求登录。
+// 读接口匿名可用（可见性由目录实体决定），写接口要求登录，运营类写接口再要求具体权限码。
 func (h *Handler) Register(r *gin.Engine) {
 	api := r.Group("/api")
 	api.Use(h.verifier.Middleware())
 	h.registerForum(api)
 	h.registerCommunity(api)
 	h.registerFavorites(api)
+	h.registerBoards(api)
 }
 
 // guard 是写操作的门槛：互动服务读接口对可见实体开放，写接口必须登录。
@@ -43,6 +44,25 @@ func (h *Handler) guard(write bool) gin.HandlerFunc {
 		return h.verifier.Required()
 	}
 	return func(c *gin.Context) { c.Next() }
+}
+
+// require 是"已登录 + 持有权限码"的门槛：匿名 401 authentication_required（与 guard 同一口径），
+// 已登录但缺码 403 forbidden。身份由组上的 Middleware 预解析，这里不重复解析令牌。
+// 判定放在中间件而不是处理器里：缺码的请求不该进入业务逻辑（更不该先读一次库再看权限）。
+func (h *Handler) require(code string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		p := h.principal(c)
+		if p == nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authentication_required"})
+			return
+		}
+		if !p.Can(code) {
+			fail(c, http.StatusForbidden, "forbidden")
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
 }
 
 func (h *Handler) principal(c *gin.Context) *auth.Principal { return auth.Current(c) }

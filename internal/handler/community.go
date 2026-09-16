@@ -134,7 +134,8 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 		c.JSON(200, gin.H{"items": items})
 	})
 
-	api.POST("/community/entities/:id/posts", h.guard(true), func(c *gin.Context) {
+	// 短评也是发帖：与发主题/回帖共用 community.post.create，避免"能发主题但不能短评"的缺口。
+	api.POST("/community/entities/:id/posts", h.require(auth.PermissionPostCreate), func(c *gin.Context) {
 		id := c.Param("id")
 		if !h.entity(c, id) {
 			return

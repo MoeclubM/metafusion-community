@@ -40,29 +40,39 @@ var communityPermissionCodes = []string{
 	PermissionBoardManage,
 }
 
+// legacyOpenCodes 是老令牌（claims 里没有 permissions）在角色兜底之外仍然放行的码。
+//
+// 只有发帖码在这一列：在这条码成为闸门之前，发主题/回帖/短评**只要求登录**，任何已登录用户
+// 都能发。账号服务尚未升级、令牌还不带 permissions 的实例如果按"角色兜底只认 admin"处理，
+// 就会变成"除了管理员谁都不能发帖"——那是把兼容策略做成了故障。
+// 治理类码（moderate / pin / board.manage）不在此列：改造前它们同样只有 admin 能过，
+// 现在保持 admin 兜底，边界不变。
+var legacyOpenCodes = []string{PermissionPostCreate}
+
 // Can 报告身份是否持有某权限码；身份为 nil（匿名）一律不放行。
 //
 // 令牌带 permissions 时**一律以码为准**（* 通配即全权）：拆服务后这是唯一的授权来源，
 // 此时角色不再额外放行，否则「角色兜底」会变成绕过权限组的后门。
-// 只有令牌完全没有 permissions 声明时（老令牌，或尚未按权限组配置的实例）才按历史角色兜底：
-// admin 放行本服务全部码，其它角色与匿名不放行——保证老令牌与本服务现有边界一致，不被打死。
+// 只有令牌完全没有 permissions 声明时（老令牌，或尚未按权限组配置的实例）才按历史边界兜底：
+// 发帖类码见 legacyOpenCodes（收口前就是"登录即可"），其余码只认 admin —— 与本服务改造前一致。
 func (p *Principal) Can(code string) bool {
 	if p == nil {
 		return false
 	}
 	if len(p.Permissions) > 0 {
-		for _, perm := range p.Permissions {
-			if perm == permissionWildcard || perm == code {
-				return true
-			}
-		}
-		return false
+		return hasCode(p.Permissions, permissionWildcard) || hasCode(p.Permissions, code)
 	}
-	if p.Role != adminRole {
-		return false
+	if hasCode(legacyOpenCodes, code) {
+		return true
 	}
-	for _, allowed := range communityPermissionCodes {
-		if allowed == code {
+	return p.Role == adminRole && hasCode(communityPermissionCodes, code)
+}
+
+// hasCode 是权限码集合的成员判定：逐字比较，不做前缀或大小写归一 ——
+// 码由账号服务下发，拼写不一致必须表现为"不放行"，而不是被兜底掩盖。
+func hasCode(codes []string, code string) bool {
+	for _, c := range codes {
+		if c == code {
 			return true
 		}
 	}
