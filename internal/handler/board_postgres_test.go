@@ -161,47 +161,50 @@ func TestTopicPinRequiresCodeAndPersists(t *testing.T) {
 	}
 }
 
-// 板块配置：无 community.board.manage 一律 403；名称传入时必须四语齐备；只改传入字段。
+// 板块配置：无 community.board.manage 一律 403；名称与描述是单语言字符串
+// （2026-09-16 起论坛不再分语言）；名称传空按非法载荷拒掉；只改传入字段。
 func TestBoardUpdateRequiresCodeAndValidatesNames(t *testing.T) {
 	ctx, db, router, key, kid := opsFixture(t)
 	manageToken := signTokenWith(t, key, kid, uuid.NewString(), "user", []string{"community_admin"}, []string{auth.PermissionBoardManage})
 	postToken := signTokenWith(t, key, kid, uuid.NewString(), "user", []string{"member"}, []string{auth.PermissionPostCreate})
 
-	readBoard := func() (map[string]string, bool, bool, int) {
+	readBoard := func() (string, string, bool, bool, int) {
 		t.Helper()
-		var namesRaw []byte
+		var name, description string
 		var enabled, inFeed bool
 		var order int
-		if err := db.QueryRowContext(ctx, "SELECT names,is_enabled,show_in_feed,sort_order FROM community.boards WHERE code=$1", "qa").Scan(&namesRaw, &enabled, &inFeed, &order); err != nil {
+		if err := db.QueryRowContext(ctx, "SELECT name,description,is_enabled,show_in_feed,sort_order FROM community.boards WHERE code=$1", "qa").Scan(&name, &description, &enabled, &inFeed, &order); err != nil {
 			t.Fatalf("查板块: %v", err)
 		}
-		names := map[string]string{}
-		_ = json.Unmarshal(namesRaw, &names)
-		return names, enabled, inFeed, order
+		return name, description, enabled, inFeed, order
 	}
 
 	// 1) 只有发帖码：403 且不改库。
 	if w := opsCall(t, router, http.MethodPut, "/api/community/boards/qa", `{"color":"sky","is_enabled":false}`, postToken); w.Code != 403 || opsErrorCode(t, w) != "forbidden" {
 		t.Fatalf("无板块码应 403 forbidden，实际 %d（%s）", w.Code, w.Body.String())
 	}
-	if _, enabled, _, _ := readBoard(); !enabled {
+	if _, _, enabled, _, _ := readBoard(); !enabled {
 		t.Fatal("无码请求不得写库")
 	}
 
-	// 2) 持码：名称四语 + 描述 + 颜色/图标/排序/两个开关，响应与库都要变。
-	payload := `{"names":{"zh-CN":"问答","zh-TW":"問答","ja-JP":"質問","en-US":"Q&A"},"descriptions":{"zh-CN":"使用问题","en-US":"Questions"},"color":"sky","icon":"LifeBuoy","sort_order":35,"is_enabled":false,"show_in_feed":false}`
+	// 2) 持码：名称 + 描述 + 颜色/图标/排序/两个开关，响应与库都要变。
+	payload := `{"name":"问答","description":"使用问题","color":"sky","icon":"LifeBuoy","sort_order":35,"is_enabled":false,"show_in_feed":false}`
 	w := opsCall(t, router, http.MethodPut, "/api/community/boards/qa", payload, manageToken)
 	if w.Code != 200 {
 		t.Fatalf("持码改板块 HTTP %d: %s", w.Code, w.Body.String())
 	}
 	board := map[string]any{}
 	_ = json.Unmarshal(w.Body.Bytes(), &board)
-	if board["code"] != "qa" || board["color"] != "sky" || board["icon"] != "LifeBuoy" || board["is_enabled"] != false || board["show_in_feed"] != false {
+	if board["code"] != "qa" || board["name"] != "问答" || board["description"] != "使用问题" ||
+		board["color"] != "sky" || board["icon"] != "LifeBuoy" || board["is_enabled"] != false || board["show_in_feed"] != false {
 		t.Fatalf("板块响应不符: %s", w.Body.String())
 	}
-	names, enabled, inFeed, order := readBoard()
-	if names["zh-TW"] != "問答" || names["ja-JP"] != "質問" || enabled || inFeed || order != 35 {
-		t.Fatalf("板块未按载荷落库: names=%v enabled=%v inFeed=%v order=%d", names, enabled, inFeed, order)
+	if _, ok := board["names"]; ok {
+		t.Fatalf("响应不应再出现 names 字段: %s", w.Body.String())
+	}
+	name, description, enabled, inFeed, order := readBoard()
+	if name != "问答" || description != "使用问题" || enabled || inFeed || order != 35 {
+		t.Fatalf("板块未按载荷落库: name=%q description=%q enabled=%v inFeed=%v order=%d", name, description, enabled, inFeed, order)
 	}
 
 	// 3) 只改传入字段：再发一个只带开关的载荷，名称与排序必须原样保留。
@@ -209,23 +212,27 @@ func TestBoardUpdateRequiresCodeAndValidatesNames(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("局部更新 HTTP %d: %s", w.Code, w.Body.String())
 	}
-	if names, enabled, _, order = readBoard(); !enabled || names["zh-TW"] != "問答" || order != 35 {
-		t.Fatalf("局部更新不应清空其它字段: names=%v enabled=%v order=%d", names, enabled, order)
+	if name, description, enabled, _, order = readBoard(); !enabled || name != "问答" || description != "使用问题" || order != 35 {
+		t.Fatalf("局部更新不应清空其它字段: name=%q description=%q enabled=%v order=%d", name, description, enabled, order)
 	}
 
-	// 4) 名称缺语种：400 且错误串要列出缺失语种（前端据此提示补哪几语）。
-	w = opsCall(t, router, http.MethodPut, "/api/community/boards/qa", `{"names":{"zh-CN":"问答","en-US":"Q&A"}}`, manageToken)
-	if w.Code != 400 || !strings.HasPrefix(opsErrorCode(t, w), "four_locale_names_required") {
-		t.Fatalf("缺语种名称应 400 four_locale_names_required，实际 %d（%s）", w.Code, w.Body.String())
+	// 4) 名称为空（或只有空白）：400 invalid_payload——板块名是身份，不能清空。
+	for _, payload := range []string{`{"name":""}`, `{"name":"   "}`} {
+		w = opsCall(t, router, http.MethodPut, "/api/community/boards/qa", payload, manageToken)
+		if w.Code != 400 || opsErrorCode(t, w) != "invalid_payload" {
+			t.Fatalf("空名称应 400 invalid_payload，实际 %d（%s）", w.Code, w.Body.String())
+		}
 	}
-	if code := opsErrorCode(t, w); !strings.Contains(code, "zh-TW") {
-		t.Fatalf("错误串应列出缺失语种: %s", code)
+	if name, _, _, _, _ = readBoard(); name != "问答" {
+		t.Fatalf("被拒的请求不得写库: name=%q", name)
 	}
 
-	// 5) ja 与 ja-JP 等价：只给 ja 也算齐备。
-	withJa := `{"names":{"zh-CN":"问答","zh-TW":"問答","ja":"質問","en-US":"Q&A"}}`
-	if w = opsCall(t, router, http.MethodPut, "/api/community/boards/qa", withJa, manageToken); w.Code != 200 {
-		t.Fatalf("只给 ja 应放行，实际 %d（%s）", w.Code, w.Body.String())
+	// 5) 描述允许显式清空：传空串即清空，名称不受影响。
+	if w = opsCall(t, router, http.MethodPut, "/api/community/boards/qa", `{"description":""}`, manageToken); w.Code != 200 {
+		t.Fatalf("清空描述 HTTP %d: %s", w.Code, w.Body.String())
+	}
+	if name, description, _, _, _ = readBoard(); description != "" || name != "问答" {
+		t.Fatalf("描述应被清空且名称保留: name=%q description=%q", name, description)
 	}
 
 	// 6) 空载荷、空颜色/图标、未知板块、code 不可改。

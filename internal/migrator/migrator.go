@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS community.schema_migrations(
   checksum text NOT NULL
 );`
 
+// migrationLockKey 是迁移期间的事务级 advisory lock 键。与目录服务（740202）、
+// 账号服务（740203）、存储服务（740204）都不同：多副本同时启动时只让一个实例执行 DDL，
+// 其余实例等它提交后重查账本空转，避免两条 CREATE TABLE 撞在 pg_type 的唯一索引上。
+const migrationLockKey = 740205
+
 type migration struct {
 	version  int64
 	name     string
@@ -124,6 +129,22 @@ func Apply(ctx context.Context, db *sql.DB) error {
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
+		}
+		if _, err = tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)", migrationLockKey); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("获取迁移锁: %w", err)
+		}
+		// 取锁后重查账本：等锁期间另一个实例可能已经把这一版应用了，此时必须空转，
+		// 否则会重复执行 DDL（幂等语句本身安全，但账本插入会撞主键）。
+		var concurrentlyApplied bool
+		if err = tx.QueryRowContext(ctx,
+			"SELECT EXISTS(SELECT 1 FROM community.schema_migrations WHERE version=$1)", m.version).Scan(&concurrentlyApplied); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("重查迁移登记表 %s: %w", m.filename, err)
+		}
+		if concurrentlyApplied {
+			_ = tx.Rollback()
+			continue
 		}
 		if _, err = tx.ExecContext(ctx, m.content); err != nil {
 			_ = tx.Rollback()

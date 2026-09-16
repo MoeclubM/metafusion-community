@@ -17,8 +17,8 @@ import (
 var frozenTableDefs = map[string]map[string]string{
 	"community.boards": {
 		"code":         "code text primary key",
-		"names":        "names jsonb not null default '{}'::jsonb",
-		"descriptions": "descriptions jsonb not null default '{}'::jsonb",
+		"name":         "name text not null default ''",
+		"description":  "description text not null default ''",
 		"color":        "color text not null default 'emerald'",
 		"icon":         "icon text not null default 'bookopen'",
 		"sort_order":   "sort_order int not null default 0",
@@ -72,6 +72,13 @@ var frozenTableDefs = map[string]map[string]string{
 var (
 	createTableRe = regexp.MustCompile(`(?is)^\s*create table if not exists\s+([a-z_.]+)\s*\(([\s\S]*)\)\s*$`)
 	identRe       = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+	// 增量迁移（000002 起）用 ALTER 改结构，结构测试必须把 ADD/DROP COLUMN 也算进终态，
+	// 否则"测试看到的库"永远停在 000001 的基线形状上。
+	alterAddRe  = regexp.MustCompile(`(?is)^\s*alter table\s+([a-z_.]+)\s+add column if not exists\s+([a-z_][a-z0-9_]*)\s+(.+?)\s*$`)
+	alterDropRe = regexp.MustCompile(`(?is)^\s*alter table\s+([a-z_.]+)\s+drop column if exists\s+([a-z_][a-z0-9_]*)\s*$`)
+	// DO $$ ... $$; 块里是带条件的回填/守卫逻辑，不是结构声明：先整体剥掉再按分号切语句
+	// （块内的分号会让简单的切分器把一条语句切成几段）。
+	doBlockRe = regexp.MustCompile(`(?is)do\s+\$\$.*?\$\$\s*;`)
 )
 
 // splitTopLevel 按顶级分隔符切分，忽略括号内的分隔符（列定义里含 (id) 这类括号）。
@@ -120,7 +127,19 @@ func stripLineComments(ddl string) string {
 func parseSchema(t *testing.T, ddl string) map[string]map[string]string {
 	t.Helper()
 	out := map[string]map[string]string{}
-	for _, stmt := range splitTopLevel(stripLineComments(ddl), ";") {
+	for _, stmt := range splitTopLevel(doBlockRe.ReplaceAllString(stripLineComments(ddl), ""), ";") {
+		if m := alterAddRe.FindStringSubmatch(stmt); m != nil {
+			if cols, ok := out[strings.ToLower(strings.TrimSpace(m[1]))]; ok {
+				cols[m[2]] = normalizeDef(m[2] + " " + m[3])
+			}
+			continue
+		}
+		if m := alterDropRe.FindStringSubmatch(stmt); m != nil {
+			if cols, ok := out[strings.ToLower(strings.TrimSpace(m[1]))]; ok {
+				delete(cols, m[2])
+			}
+			continue
+		}
 		m := createTableRe.FindStringSubmatch(stmt)
 		if m == nil {
 			continue

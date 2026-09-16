@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -23,39 +22,31 @@ import (
 //
 // 数据只落本服务的 community schema，不触碰目录库实体表。
 
-// defaultBoards 是首次运行播种的板块。名称以 names JSONB 存储（四语回退），
-// 前端展示优先走 i18n 键 board.<code>，这里的名称仅作离线/未知语种回退。
+// defaultBoards 是首次运行播种的板块。名称与描述是**单语言字段**（用户决议 2026-09-16：
+// 论坛不再分语言），这里用站点主语言中文；前端直接展示服务端给的值，不再按 locale 取映射。
 var defaultBoards = []struct {
-	Code   string
-	Names  map[string]string
-	Descs  map[string]string
-	Color  string
-	Icon   string
-	Order  int
-	InFeed bool
+	Code        string
+	Name        string
+	Description string
+	Color       string
+	Icon        string
+	Order       int
+	InFeed      bool
 }{
-	{"announcement", map[string]string{"zh-CN": "站点公告", "zh-TW": "站點公告", "ja-JP": "お知らせ", "en-US": "Announcements"},
-		map[string]string{"zh-CN": "站点公告与运营通知", "zh-TW": "站點公告與營運通知", "ja-JP": "サイトからのお知らせ", "en-US": "Site announcements"}, "amber", "Megaphone", 10, true},
-	{"casual", map[string]string{"zh-CN": "闲聊杂谈", "zh-TW": "閒聊雜談", "ja-JP": "雑談", "en-US": "Casual"},
-		map[string]string{"zh-CN": "轻松闲聊与日常交流", "zh-TW": "輕鬆閒聊與日常交流", "ja-JP": "気軽な雑談と交流", "en-US": "Casual chat"}, "purple", "Coffee", 20, true},
-	{"qa", map[string]string{"zh-CN": "求助答疑", "zh-TW": "求助答疑", "ja-JP": "質問・回答", "en-US": "Q&A"},
-		map[string]string{"zh-CN": "使用问题、编目与功能答疑", "zh-TW": "使用問題、編目與功能答疑", "ja-JP": "使い方・編目・機能の質問", "en-US": "Questions and help"}, "teal", "Hash", 30, true},
-	{"reviews", map[string]string{"zh-CN": "考据评注", "zh-TW": "考據評註", "ja-JP": "考証・レビュー", "en-US": "Reviews"},
-		map[string]string{"zh-CN": "版本考证、原盘评析与文献释读", "zh-TW": "版本考證、原盤評析與文獻釋讀", "ja-JP": "版の考証・レビュー", "en-US": "Edition analysis and reviews"}, "emerald", "BookOpen", 40, true},
-	{"bug_report", map[string]string{"zh-CN": "反馈与建议", "zh-TW": "回饋與建議", "ja-JP": "不具合報告・要望", "en-US": "Feedback"},
-		map[string]string{"zh-CN": "缺陷反馈、功能建议与复现信息", "zh-TW": "缺陷回饋、功能建議與重現資訊", "ja-JP": "不具合報告と機能要望", "en-US": "Bug reports and feature requests"}, "rose", "Bug", 50, true},
-	{"comment", map[string]string{"zh-CN": "评论专用", "zh-TW": "評論專用", "ja-JP": "コメント用", "en-US": "Comments"},
-		map[string]string{"zh-CN": "作品与讨论的评论承载区，不进入信息流", "zh-TW": "作品與討論的評論承載區，不進入資訊流", "ja-JP": "コメント専用（フィード非表示）", "en-US": "Comment carrier, excluded from feeds"}, "sky", "MessageCircle", 60, false},
+	{"announcement", "站点公告", "站点公告与运营通知", "amber", "Megaphone", 10, true},
+	{"casual", "闲聊杂谈", "轻松闲聊与日常交流", "purple", "Coffee", 20, true},
+	{"qa", "求助答疑", "使用问题、编目与功能答疑", "teal", "Hash", 30, true},
+	{"reviews", "考据评注", "版本考证、原盘评析与文献释读", "emerald", "BookOpen", 40, true},
+	{"bug_report", "反馈与建议", "缺陷反馈、功能建议与复现信息", "rose", "Bug", 50, true},
+	{"comment", "评论专用", "作品与讨论的评论承载区，不进入信息流", "sky", "MessageCircle", 60, false},
 }
 
 func seedForum(ctx context.Context, db *sql.DB) error {
 	for _, b := range defaultBoards {
-		names, _ := json.Marshal(b.Names)
-		descs, _ := json.Marshal(b.Descs)
 		if _, err := db.ExecContext(ctx, `
-			INSERT INTO community.boards(code,names,descriptions,color,icon,sort_order,is_enabled,show_in_feed)
+			INSERT INTO community.boards(code,name,description,color,icon,sort_order,is_enabled,show_in_feed)
 			VALUES($1,$2,$3,$4,$5,$6,true,$7) ON CONFLICT (code) DO NOTHING`,
-			b.Code, string(names), string(descs), b.Color, b.Icon, b.Order, b.InFeed); err != nil {
+			b.Code, b.Name, b.Description, b.Color, b.Icon, b.Order, b.InFeed); err != nil {
 			return err
 		}
 	}
@@ -72,18 +63,18 @@ const commentBoard = "comment"
 const feedScanCap = 500
 
 type forumBoard struct {
-	Code         string            `json:"code"`
-	Names        map[string]string `json:"names"`
-	Descriptions map[string]string `json:"descriptions"`
-	Color        string            `json:"color"`
-	Icon         string            `json:"icon"`
-	SortOrder    int               `json:"sort_order"`
-	IsEnabled    bool              `json:"is_enabled"`
-	ShowInFeed   bool              `json:"show_in_feed"`
+	Code        string `json:"code"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Color       string `json:"color"`
+	Icon        string `json:"icon"`
+	SortOrder   int    `json:"sort_order"`
+	IsEnabled   bool   `json:"is_enabled"`
+	ShowInFeed  bool   `json:"show_in_feed"`
 }
 
 func (h *Handler) listBoards(ctx context.Context) ([]forumBoard, error) {
-	rows, err := h.db.QueryContext(ctx, `SELECT code,names,descriptions,color,icon,sort_order,is_enabled,show_in_feed FROM community.boards ORDER BY sort_order,code`)
+	rows, err := h.db.QueryContext(ctx, `SELECT code,name,description,color,icon,sort_order,is_enabled,show_in_feed FROM community.boards ORDER BY sort_order,code`)
 	if err != nil {
 		return nil, err
 	}
@@ -91,14 +82,9 @@ func (h *Handler) listBoards(ctx context.Context) ([]forumBoard, error) {
 	out := []forumBoard{}
 	for rows.Next() {
 		var b forumBoard
-		var names, descs []byte
-		if err := rows.Scan(&b.Code, &names, &descs, &b.Color, &b.Icon, &b.SortOrder, &b.IsEnabled, &b.ShowInFeed); err != nil {
+		if err := rows.Scan(&b.Code, &b.Name, &b.Description, &b.Color, &b.Icon, &b.SortOrder, &b.IsEnabled, &b.ShowInFeed); err != nil {
 			return nil, err
 		}
-		b.Names = map[string]string{}
-		b.Descriptions = map[string]string{}
-		_ = json.Unmarshal(names, &b.Names)
-		_ = json.Unmarshal(descs, &b.Descriptions)
 		out = append(out, b)
 	}
 	return out, rows.Err()

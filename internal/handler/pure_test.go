@@ -84,29 +84,6 @@ func TestStoreErrorMapping(t *testing.T) {
 	}
 }
 
-// 板块名称与目录侧定义名称同一口径：zh-CN / zh-TW / en-US 逐个必需，
-// 日文接受 ja 或 ja-JP 其中之一。缺失语种要能被逐个列出（前端据此提示补哪几语）。
-func TestBoardNameLocalesRequireFourLanguages(t *testing.T) {
-	full := map[string]string{"zh-CN": "问答", "zh-TW": "問答", "ja-JP": "質問", "en-US": "Q&A"}
-	if missing := missingBoardNameLocales(full); len(missing) != 0 {
-		t.Fatalf("四语齐备不应报缺失，实际 %v", missing)
-	}
-	// ja 与 ja-JP 等价：只写 ja 也算齐备（存量键名两种都有）。
-	withJa := map[string]string{"zh-CN": "问答", "zh-TW": "問答", "ja": "質問", "en-US": "Q&A"}
-	if missing := missingBoardNameLocales(withJa); len(missing) != 0 {
-		t.Fatalf("只写 ja 也应算齐备，实际 %v", missing)
-	}
-	partial := map[string]string{"zh-CN": "问答", "en-US": "Q&A"}
-	got := strings.Join(missingBoardNameLocales(partial), ",")
-	if got != "zh-TW,ja-JP" {
-		t.Fatalf("缺失语种 = %q，期望 zh-TW,ja-JP", got)
-	}
-	if got := strings.Join(missingBoardNameLocales(nil), ","); got != "zh-CN,zh-TW,en-US,ja-JP" {
-		t.Fatalf("空名称应报全部语种缺失，实际 %q", got)
-	}
-	// 只有空白字符等于没填：不能因为键存在就放过。
-	blank := map[string]string{"zh-CN": "  ", "zh-TW": "問答", "ja-JP": "質問", "en-US": "Q&A"}
-	if got := strings.Join(missingBoardNameLocales(blank), ","); got != "zh-CN" {
-		t.Fatalf("空白值应判为缺失，实际 %q", got)
-	}
-}
+// 板块名称的四语校验用例已随"论坛不再分语言"移除（2026-09-16）：板块只有单语言 name，
+// 校验退化为"非空"，覆盖在 board_postgres_test.go 的 TestBoardUpdateRequiresCodeAndValidatesNames 里。
+// 四语齐备规则仍然适用于目录侧的 definitions / shelves / external_databases，那些在 catalog 侧校验。

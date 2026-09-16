@@ -44,8 +44,15 @@ const setTagsSeq = `SELECT setval(pg_get_serial_sequence('%s.tags','id'), GREATE
 // forwardSteps：主仓库 → 互动服务。目标表名不变，只有 schema 变化；
 // 唯一跨 schema 的源是收藏（主仓库把它放在 catalog schema 里）。
 var forwardSteps = []step{
-	{name: "boards", table: "forum_boards", sql: `INSERT INTO community.boards(code,names,descriptions,color,icon,sort_order,is_enabled,show_in_feed)
-		SELECT code,names,descriptions,color,icon,sort_order,is_enabled,show_in_feed FROM modules.forum_boards
+	// 目标侧（community.boards）自 000002 起是单语言 name/description，老表仍是 jsonb 四语 map：
+	// 这里按与迁移同一优先级取一个值（zh-CN → en-US → zh-TW → ja-JP → 任一值 → code）。
+	{name: "boards", table: "forum_boards", sql: `INSERT INTO community.boards(code,name,description,color,icon,sort_order,is_enabled,show_in_feed)
+		SELECT code,
+			COALESCE(NULLIF(btrim(names->>'zh-CN'),''), NULLIF(btrim(names->>'en-US'),''), NULLIF(btrim(names->>'zh-TW'),''), NULLIF(btrim(names->>'ja-JP'),''),
+				(SELECT NULLIF(btrim(v),'') FROM jsonb_each_text(names) ORDER BY key LIMIT 1), code),
+			COALESCE(NULLIF(btrim(descriptions->>'zh-CN'),''), NULLIF(btrim(descriptions->>'en-US'),''), NULLIF(btrim(descriptions->>'zh-TW'),''), NULLIF(btrim(descriptions->>'ja-JP'),''),
+				(SELECT NULLIF(btrim(v),'') FROM jsonb_each_text(descriptions) ORDER BY key LIMIT 1), ''),
+			color,icon,sort_order,is_enabled,show_in_feed FROM modules.forum_boards
 		ON CONFLICT (code) DO NOTHING`},
 	{name: "topics", table: "forum_topics", sql: `INSERT INTO community.topics(id,board_code,author_id,author_name,title,body,language,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at)
 		SELECT id,board_code,author_id,author_name,title,body,language,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at FROM modules.forum_topics
@@ -72,8 +79,12 @@ var forwardSteps = []step{
 
 // backSteps：互动服务 → 主仓库（回滚用）。顺序与外键一致，源表都在 community schema。
 var backSteps = []step{
+	// 反向搬运回老表：单语言值按 zh-CN 一个键写回 jsonb（老表口径是四语 map，回滚只要求字段能装下）。
 	{name: "boards", schema: "community", sql: `INSERT INTO modules.forum_boards(code,names,descriptions,color,icon,sort_order,is_enabled,show_in_feed)
-		SELECT code,names,descriptions,color,icon,sort_order,is_enabled,show_in_feed FROM community.boards
+		SELECT code,
+			jsonb_build_object('zh-CN', name),
+			jsonb_build_object('zh-CN', description),
+			color,icon,sort_order,is_enabled,show_in_feed FROM community.boards
 		ON CONFLICT (code) DO NOTHING`},
 	{name: "topics", schema: "community", sql: `INSERT INTO modules.forum_topics(id,board_code,author_id,author_name,title,body,language,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at)
 		SELECT id,board_code,author_id,author_name,title,body,language,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at FROM community.topics

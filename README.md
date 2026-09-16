@@ -36,7 +36,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 | GET | `/api/community/posts/{id}` | 匿名 | 单条短评（稳定 permalink） |
 | DELETE | `/api/community/posts/{id}` | 作者 / `community.post.moderate` | 删短评（仅评论板块） |
 | PUT | `/api/community/topics/{id}/pin` | `community.topic.pin` | 置顶 / 取消置顶（`{pinned: bool}`，写 `is_pinned`；评论板块的条目不可置顶） |
-| PUT | `/api/community/boards/{code}` | `community.board.manage` | 板块配置：`names` / `descriptions`（四语 map）、`color`、`icon`、`sort_order`、`is_enabled`、`show_in_feed`；只改传入字段，`code` 不可改，不提供新增与删除板块 |
+| PUT | `/api/community/boards/{code}` | `community.board.manage` | 板块配置：`name` / `description`（**单语言字符串**，2026-09-16 起论坛不再分语言）、`color`、`icon`、`sort_order`、`is_enabled`、`show_in_feed`；只改传入字段，`name` 不可为空，`code` 不可改，不提供新增与删除板块 |
 | GET | `/api/community/entities/{id}/collections` | 匿名 | 关联的合集（经目录关系接口，不 JOIN 目录表） |
 | POST | `/api/favorites/toggle` | 登录 | 切换收藏（目标必须是可见实体，且 kind 与 `target_type` 相符） |
 | GET | `/api/favorites/status` | 匿名 | 批量查询收藏状态（未登录返回空集合） |

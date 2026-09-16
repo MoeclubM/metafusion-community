@@ -30,7 +30,7 @@ func TestSchemaTopicsAndFavoritesAgainstPostgres(t *testing.T) {
 	// 板块定义在 handler 包（seedForum），这里按同一 SQL 建一块用于话题测试。
 	if _, err = db.ExecContext(ctx, `
 		WITH b AS (
-			INSERT INTO community.boards(code,names) VALUES('qa','{}'::jsonb)
+			INSERT INTO community.boards(code,name) VALUES('qa','问答')
 			ON CONFLICT (code) DO UPDATE SET code=EXCLUDED.code
 			RETURNING code
 		), t AS (
