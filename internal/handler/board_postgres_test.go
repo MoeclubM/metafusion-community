@@ -161,81 +161,138 @@ func TestTopicPinRequiresCodeAndPersists(t *testing.T) {
 	}
 }
 
-// 板块配置：无 community.board.manage 一律 403；名称与描述是单语言字符串
-// （2026-09-16 起论坛不再分语言）；名称传空按非法载荷拒掉；只改传入字段。
-func TestBoardUpdateRequiresCodeAndValidatesNames(t *testing.T) {
+// boardNames 造一份四语齐备的语种 map：接口只收多语言 map，缺语种一律 400。
+func boardNames(zhCN, zhTW, jaJP, enUS string) string {
+	return `{"zh-CN":"` + zhCN + `","zh-TW":"` + zhTW + `","ja-JP":"` + jaJP + `","en-US":"` + enUS + `"}`
+}
+
+// responseLocales 断言响应里的语种 map 字段确实是 map 形状（前端按 locale 取键，不接受单值）。
+func responseLocales(t *testing.T, board map[string]any, field string) map[string]string {
+	t.Helper()
+	raw, ok := board[field]
+	if !ok {
+		t.Fatalf("板块响应缺少 %s 字段: %v", field, board)
+	}
+	values, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("%s 应是语种 map，实际 %T: %v", field, raw, raw)
+	}
+	out := map[string]string{}
+	for k, v := range values {
+		s, _ := v.(string)
+		out[k] = s
+	}
+	return out
+}
+
+// 板块配置：无 community.board.manage 一律 403；名称与描述是**四语 map**（缺语种 400
+// four_locale_names_required）；单值 name/description 只作为回退值由多语言 map 派生；只改传入字段。
+func TestBoardUpdateRequiresCodeAndValidatesLocales(t *testing.T) {
 	ctx, db, router, key, kid := opsFixture(t)
 	manageToken := signTokenWith(t, key, kid, uuid.NewString(), "user", []string{"community_admin"}, []string{auth.PermissionBoardManage})
 	postToken := signTokenWith(t, key, kid, uuid.NewString(), "user", []string{"member"}, []string{auth.PermissionPostCreate})
 
-	readBoard := func() (string, string, bool, bool, int) {
+	// 库侧形状：多语言列是权威，单值列是与 zh-CN 同步的回退值。
+	readBoard := func() (string, string, string, string, bool, bool, int) {
 		t.Helper()
-		var name, description string
+		var names, descriptions, name, description string
 		var enabled, inFeed bool
 		var order int
-		if err := db.QueryRowContext(ctx, "SELECT name,description,is_enabled,show_in_feed,sort_order FROM community.boards WHERE code=$1", "qa").Scan(&name, &description, &enabled, &inFeed, &order); err != nil {
+		if err := db.QueryRowContext(ctx,
+			"SELECT names::text,descriptions::text,name,description,is_enabled,show_in_feed,sort_order FROM community.boards WHERE code=$1", "qa").Scan(
+			&names, &descriptions, &name, &description, &enabled, &inFeed, &order); err != nil {
 			t.Fatalf("查板块: %v", err)
 		}
-		return name, description, enabled, inFeed, order
+		return names, descriptions, name, description, enabled, inFeed, order
 	}
 
 	// 1) 只有发帖码：403 且不改库。
 	if w := opsCall(t, router, http.MethodPut, "/api/community/boards/qa", `{"color":"sky","is_enabled":false}`, postToken); w.Code != 403 || opsErrorCode(t, w) != "forbidden" {
 		t.Fatalf("无板块码应 403 forbidden，实际 %d（%s）", w.Code, w.Body.String())
 	}
-	if _, _, enabled, _, _ := readBoard(); !enabled {
+	if _, _, _, _, enabled, _, _ := readBoard(); !enabled {
 		t.Fatal("无码请求不得写库")
 	}
 
-	// 2) 持码：名称 + 描述 + 颜色/图标/排序/两个开关，响应与库都要变。
-	payload := `{"name":"问答","description":"使用问题","color":"sky","icon":"LifeBuoy","sort_order":35,"is_enabled":false,"show_in_feed":false}`
+	// 2) 持码：四语名称 + 四语描述 + 颜色/图标/排序/两个开关，响应与库都要变。
+	payload := `{"names":` + boardNames("问答", "問答", "質問", "Q&A") +
+		`,"descriptions":` + boardNames("使用问题", "使用問題", "使い方の質問", "Usage questions") +
+		`,"color":"sky","icon":"LifeBuoy","sort_order":35,"is_enabled":false,"show_in_feed":false}`
 	w := opsCall(t, router, http.MethodPut, "/api/community/boards/qa", payload, manageToken)
 	if w.Code != 200 {
 		t.Fatalf("持码改板块 HTTP %d: %s", w.Code, w.Body.String())
 	}
 	board := map[string]any{}
 	_ = json.Unmarshal(w.Body.Bytes(), &board)
-	if board["code"] != "qa" || board["name"] != "问答" || board["description"] != "使用问题" ||
-		board["color"] != "sky" || board["icon"] != "LifeBuoy" || board["is_enabled"] != false || board["show_in_feed"] != false {
+	if board["code"] != "qa" || board["color"] != "sky" || board["icon"] != "LifeBuoy" || board["is_enabled"] != false || board["show_in_feed"] != false {
 		t.Fatalf("板块响应不符: %s", w.Body.String())
 	}
-	if _, ok := board["names"]; ok {
-		t.Fatalf("响应不应再出现 names 字段: %s", w.Body.String())
+	names := responseLocales(t, board, "names")
+	if names["zh-CN"] != "问答" || names["zh-TW"] != "問答" || names["ja-JP"] != "質問" || names["en-US"] != "Q&A" {
+		t.Fatalf("响应 names 未按四语原样返回: %v（%s）", names, w.Body.String())
 	}
-	name, description, enabled, inFeed, order := readBoard()
+	descriptions := responseLocales(t, board, "descriptions")
+	if descriptions["ja-JP"] != "使い方の質問" || descriptions["zh-CN"] != "使用问题" {
+		t.Fatalf("响应 descriptions 未按四语返回: %v（%s）", descriptions, w.Body.String())
+	}
+	// 单值列是回退值：由多语言 map 的 zh-CN 派生，老读方拿到的不再是空串。
+	if board["name"] != "问答" || board["description"] != "使用问题" {
+		t.Fatalf("单值回退字段应由 zh-CN 派生: %s", w.Body.String())
+	}
+	storedNames, storedDescriptions, name, description, enabled, inFeed, order := readBoard()
+	if !strings.Contains(storedNames, "質問") || !strings.Contains(storedDescriptions, "使い方の質問") {
+		t.Fatalf("多语言列未按载荷落库: names=%s descriptions=%s", storedNames, storedDescriptions)
+	}
 	if name != "问答" || description != "使用问题" || enabled || inFeed || order != 35 {
 		t.Fatalf("板块未按载荷落库: name=%q description=%q enabled=%v inFeed=%v order=%d", name, description, enabled, inFeed, order)
 	}
 
-	// 3) 只改传入字段：再发一个只带开关的载荷，名称与排序必须原样保留。
+	// 3) 只改传入字段：再发一个只带开关的载荷，多语言列、回退单值与排序必须原样保留。
 	w = opsCall(t, router, http.MethodPut, "/api/community/boards/qa", `{"is_enabled":true}`, manageToken)
 	if w.Code != 200 {
 		t.Fatalf("局部更新 HTTP %d: %s", w.Code, w.Body.String())
 	}
-	if name, description, enabled, _, order = readBoard(); !enabled || name != "问答" || description != "使用问题" || order != 35 {
-		t.Fatalf("局部更新不应清空其它字段: name=%q description=%q enabled=%v order=%d", name, description, enabled, order)
+	if storedNames, _, name, description, enabled, _, order = readBoard(); !enabled || name != "问答" || description != "使用问题" || order != 35 || !strings.Contains(storedNames, "Q&A") {
+		t.Fatalf("局部更新不应清空其它字段: name=%q description=%q enabled=%v order=%d names=%s", name, description, enabled, order, storedNames)
 	}
 
-	// 4) 名称为空（或只有空白）：400 invalid_payload——板块名是身份，不能清空。
-	for _, payload := range []string{`{"name":""}`, `{"name":"   "}`} {
+	// 4) 缺语种：400 four_locale_names_required，错误信息里列出缺的语种（与目录侧同一标识）。
+	//    单值 name 不再是可接受的输入形态：不给"绕过四语校验"的后门，也不猜语种。
+	partialNames := `{"names":` + boardNames("问答", "問答", "  ", "Q&A") + `}`
+	for _, payload := range []string{
+		`{"names":{"zh-CN":"问答","zh-TW":"問答","en-US":"Q&A"}}`, // 缺 ja-JP
+		`{"names":{"zh-CN":"问答"}}`,                            // 只给一个语种
+		`{"name":"问答"}`,                                       // 单值形态不再可写
+		partialNames,                                          // ja-JP 只给了空白
+		`{"descriptions":{"zh-CN":"使用问题"}}`,                   // 描述同样要求四语
+	} {
 		w = opsCall(t, router, http.MethodPut, "/api/community/boards/qa", payload, manageToken)
-		if w.Code != 400 || opsErrorCode(t, w) != "invalid_payload" {
-			t.Fatalf("空名称应 400 invalid_payload，实际 %d（%s）", w.Code, w.Body.String())
+		if w.Code != 400 {
+			t.Fatalf("载荷 %s 应 400，实际 %d（%s）", payload, w.Code, w.Body.String())
+		}
+		code := opsErrorCode(t, w)
+		// 单值形态连语言维度都没有，落到"空载荷"这条通用校验；其余一律是四语校验的专属错误码。
+		want := "four_locale_names_required"
+		if !strings.Contains(payload, `"names":{`) && !strings.Contains(payload, `"descriptions":{`) {
+			want = "invalid_payload"
+		}
+		if !strings.Contains(code, want) {
+			t.Fatalf("载荷 %s 的错误码 = %q，期望含 %q", payload, code, want)
 		}
 	}
-	if name, _, _, _, _ = readBoard(); name != "问答" {
-		t.Fatalf("被拒的请求不得写库: name=%q", name)
+	if storedNames, storedDescriptions, name, description, _, _, _ = readBoard(); name != "问答" || description != "使用问题" || !strings.Contains(storedNames, "Q&A") || !strings.Contains(storedDescriptions, "使い方の質問") {
+		t.Fatalf("被拒的请求不得写库: name=%q description=%q names=%s descriptions=%s", name, description, storedNames, storedDescriptions)
 	}
 
-	// 5) 描述允许显式清空：传空串即清空，名称不受影响。
-	if w = opsCall(t, router, http.MethodPut, "/api/community/boards/qa", `{"description":""}`, manageToken); w.Code != 200 {
+	// 5) 描述允许显式清空：四语全传空串即清空（名称不受影响）。
+	if w = opsCall(t, router, http.MethodPut, "/api/community/boards/qa", `{"descriptions":`+boardNames("", "", "", "")+`}`, manageToken); w.Code != 200 {
 		t.Fatalf("清空描述 HTTP %d: %s", w.Code, w.Body.String())
 	}
-	if name, description, _, _, _ = readBoard(); description != "" || name != "问答" {
-		t.Fatalf("描述应被清空且名称保留: name=%q description=%q", name, description)
+	if storedNames, storedDescriptions, name, description, _, _, _ = readBoard(); description != "" || name != "问答" || !strings.Contains(storedNames, "Q&A") || strings.Contains(storedDescriptions, "使い方の質問") {
+		t.Fatalf("描述应被清空且名称保留: name=%q description=%q descriptions=%s", name, description, storedDescriptions)
 	}
 
-	// 6) 空载荷、空颜色/图标、未知板块、code 不可改。
+	// 6) 空载荷、空颜色/图标、未知板块、code 不可改（与名称/描述无关的通用边界）。
 	if w = opsCall(t, router, http.MethodPut, "/api/community/boards/qa", `{}`, manageToken); w.Code != 400 || opsErrorCode(t, w) != "invalid_payload" {
 		t.Fatalf("空载荷应 400 invalid_payload，实际 %d（%s）", w.Code, w.Body.String())
 	}

@@ -84,6 +84,40 @@ func TestStoreErrorMapping(t *testing.T) {
 	}
 }
 
-// 板块名称的四语校验用例已随"论坛不再分语言"移除（2026-09-16）：板块只有单语言 name，
-// 校验退化为"非空"，覆盖在 board_postgres_test.go 的 TestBoardUpdateRequiresCodeAndValidatesNames 里。
-// 四语齐备规则仍然适用于目录侧的 definitions / shelves / external_databases，那些在 catalog 侧校验。
+// 板块名的四语齐备判据（用户决议：论坛只去掉语言维度，不去字段）：板块名与描述是语种 map，
+// 缺任一语种都按 four_locale_names_required 拒掉，与目录侧 definitions / shelves /
+// external_databases 的标识同名——前端复用同一套错误文案。
+func TestResolveBoardLocalesRequiresFourLocales(t *testing.T) {
+	full := map[string]string{"zh-CN": "问答", "zh-TW": "問答", "ja-JP": "質問", "en-US": "Q&A"}
+	full["zh-CN"] = "  问答  " // 裁剪空白后才判非空
+	got, code := resolveBoardLocales(full)
+	if code != "" {
+		t.Fatalf("四语齐备不应报错：%s", code)
+	}
+	if got["zh-CN"] != "问答" || got["ja-JP"] != "質問" {
+		t.Fatalf("语种值应裁剪空白后原样保留：%v", got)
+	}
+
+	// 缺语种：错误码带缺的语种，顺序与 boardLocales 一致。
+	if _, code = resolveBoardLocales(map[string]string{"zh-CN": "问答", "en-US": "Q&A"}); code != "four_locale_names_required: zh-TW,ja-JP" {
+		t.Fatalf("缺语种错误码 = %q", code)
+	}
+	// 空白值等同缺该语种，不能被当成"有值"。
+	if _, code = resolveBoardLocales(map[string]string{"zh-CN": "问答", "zh-TW": "問答", "ja-JP": "  ", "en-US": "Q&A"}); code != "four_locale_names_required: ja-JP" {
+		t.Fatalf("空白语种值的错误码 = %q", code)
+	}
+	// 四语全空是"显式清空"，由调用方决定是否允许（板块名不允许、描述允许）。
+	if emptied, code := resolveBoardLocales(map[string]string{"zh-CN": "", "zh-TW": "", "ja-JP": "", "en-US": ""}); code != "" || len(emptied) != 0 {
+		t.Fatalf("四语全空应判为清空：%v / %s", emptied, code)
+	}
+	// 单值列的回退值固定取 zh-CN，缺中文键时按语种清单取第一个非空值，绝不返回空串以外的猜测。
+	if derived := aggregateLocale(map[string]string{"zh-CN": "问答", "en-US": "Q&A"}); derived != "问答" {
+		t.Fatalf("aggregateLocale = %q，期望 zh-CN 的值", derived)
+	}
+	if derived := aggregateLocale(map[string]string{"en-US": "Q&A"}); derived != "Q&A" {
+		t.Fatalf("缺中文键时 aggregateLocale = %q，期望回退到第一个非空语种", derived)
+	}
+	if derived := aggregateLocale(map[string]string{}); derived != "" {
+		t.Fatalf("空 map 的 aggregateLocale = %q，期望空串", derived)
+	}
+}

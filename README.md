@@ -17,7 +17,8 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 ## HTTP 契约
 
-路径与请求/响应形状与原单体 `modules` 包**逐字一致**，切流时前端零改动。已切流（2026-09-14，开发实例）：
+绝大多数路径与请求/响应形状与原单体 `modules` 包**逐字一致**，切流时前端零改动；已知例外只有一处，
+见下面「语言维度只去接口层」。已切流（2026-09-14，开发实例）：
 网关把 `/api/community/*`、`/api/favorites/*`、`/api/records/*`、`^/api/users/[^/]+/favorites$` 指到本服务。
 
 | 方法 | 路径 | 鉴权 | 说明 |
@@ -36,7 +37,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 | GET | `/api/community/posts/{id}` | 匿名 | 单条短评（稳定 permalink） |
 | DELETE | `/api/community/posts/{id}` | 作者 / `community.post.moderate` | 删短评（仅评论板块） |
 | PUT | `/api/community/topics/{id}/pin` | `community.topic.pin` | 置顶 / 取消置顶（`{pinned: bool}`，写 `is_pinned`；评论板块的条目不可置顶） |
-| PUT | `/api/community/boards/{code}` | `community.board.manage` | 板块配置：`name` / `description`（**单语言字符串**，2026-09-16 起论坛不再分语言）、`color`、`icon`、`sort_order`、`is_enabled`、`show_in_feed`；只改传入字段，`name` 不可为空，`code` 不可改，不提供新增与删除板块 |
+| PUT | `/api/community/boards/{code}` | `community.board.manage` | 板块配置：`names` / `descriptions`（**四语 map**，缺语种 400 `four_locale_names_required`）、`color`、`icon`、`sort_order`、`is_enabled`、`show_in_feed`；只改传入字段，`names` 不可为空，`code` 不可改，不提供新增与删除板块 |
 | GET | `/api/community/entities/{id}/collections` | 匿名 | 关联的合集（经目录关系接口，不 JOIN 目录表） |
 | POST | `/api/favorites/toggle` | 登录 | 切换收藏（目标必须是可见实体，且 kind 与 `target_type` 相符） |
 | GET | `/api/favorites/status` | 匿名 | 批量查询收藏状态（未登录返回空集合） |
@@ -47,6 +48,16 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 论坛主题与"实体短评"共用同一张 `community.topics`，靠板块区分语义：评论锚定实体、无独立标题、不进信息流；
 主题有标题、可独立成文、进信息流（`show_in_feed`）。
+
+**语言维度只去接口层，不去字段**（用户决议 2026-09-17）：
+
+- 主题与回复的接口没有语言维度：`GET /api/community/topics` 不读 `?language=`、发帖/改帖请求体没有 `language`、
+  SELECT 列清单里也没有它（老前端传了只被忽略，不报错）；
+- 板块名与描述是**多语言 map**：列表与管理接口收发 `names` / `descriptions`（`{"zh-CN":…,"zh-TW":…,"ja-JP":…,"en-US":…}`），
+  服务端不做单语解析，前端按显示语言取键、缺键走自己的回退链；
+- 管理接口收 `names` / `descriptions` 时要求**四语齐备**，缺语种返回 400 `four_locale_names_required: <缺的语种>`
+  （与目录侧 definitions / shelves / external_databases 同一标识，前端复用同一套错误文案）；描述允许四语全传空串来清空；
+- 库里的列全部保留，见下一节。
 
 ## 权限
 
@@ -70,7 +81,32 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 **结构由版本化迁移管理**：`migrations/*.up.sql` 是 `community` schema 的唯一结构来源，服务启动时按版本应用
 （已应用则跳过，登记在 `community.schema_migrations`），重复启动不会改动已存在的表；
-下面的一次性工具只搬数据、不管结构。
+下面的一次性工具只搬数据、不管结构。已应用的迁移文件按 checksum 校验，**不能改**：
+结构要变就新增版本，改了已应用的文件会让服务拒绝启动。
+
+### 语言字段的现状与取舍
+
+版本序列：`000001` 基线（多语言 JSONB + `topics.language`）→ `000002` 板块名收敛为单值列 →
+`000003` 主题 language 列退役 → `000004` **前向恢复**多语言列（接口层不引入语言维度）。
+
+| 列 | 状态 | 谁在用 |
+| --- | --- | --- |
+| `community.boards.names` / `descriptions`（jsonb） | 保留，**权威** | 板块列表与管理接口只收发它 |
+| `community.boards.name` / `description`（text） | 保留，**兼容/回退** | 由 `names`/`descriptions` 的 zh-CN 派生；不再接受写入 |
+| `community.topics.language`（text） | 保留，恒为空串 | 无：接口不 SELECT、不接受、不返回 |
+
+两处取舍与理由：
+
+- **单值列不 DROP**。000002 已经把它做成了权威字段，000004 之后管理接口改为只写多语言 map，
+  单值列退化为"容量层的兼容/回退列"——派生值口径固定（zh-CN 优先），读方（老前端、排查用的 SQL）
+  仍能从一个平列取到板块名。DROP 掉反而要让所有只认单值的读方改用 `names ->> 'zh-CN'`，
+  收益只是少一列，不划算；`000004` 的回填方向也刻意定成"单值 → 多语言"，让这两列互为一致性校验。
+- **`topics.language` 的历史值不恢复**：000003 已经把列连同数据一起 DROP，旧单体的
+  `modules.forum_topics.language` 也不保证与切流后的写入同步。000004 只把列加回来并保持空串，
+  它不参与任何读取——加回来是为了满足"列必须保留"的库结构口径，不是要让语言维度回到接口里。
+- **板块管理接口的四语校验只认 map**：载荷里带单值 `name` 会被当作空载荷拒绝（gin 忽略未声明字段）。
+  给单值开一条写入口等于在接口层把语言维度装回来，还会让"这次到底改了哪个语种"说不清；
+  前端本来就按 `DynamicNamesEditor` 那类四语编辑器提交 map。
 
 本服务拥有 `community` schema，表结构与主仓库 `modules` 包中的 `forum_*` / `records` **逐列一致**，
 因此切流前可用附带的一次性导入工具搬运数据，不需要字段映射：

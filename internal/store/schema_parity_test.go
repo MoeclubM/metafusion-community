@@ -6,17 +6,25 @@ import (
 	"testing"
 )
 
-// frozenTableDefs 是**从主仓库 modules 包逐列抄下来的**社区表定义（列名 + 类型 + 约束 + 默认值）。
+// frozenTableDefs 是社区表的**终态**定义（列名 + 类型 + 约束 + 默认值），由 schemaDDL 解析
+// 全部迁移文件（000001 基线 + 各增量）后比对。基线列抄自主仓库 modules 包的老表，
+// 000002 之后的增量列（单值列与 000004 恢复的多语言列）按"字段保留、接口去语言"的决议冻结。
 //
 // 为什么要冻结：互动服务里大量 handler 是从单体直接搬过来的，它们的 SQL 是按老表结构写的。
-// 一旦本服务的建表语句与老表有任何漂移（少一列、类型不同、丢了默认值），
+// 一旦建表语句与这份清单有任何漂移（少一列、类型不同、丢了默认值），
 // 编译与静态检查都不会报错，却会在切流后的第一次真实写入时 500。
+//
+// boards 的终态是**单值列与多语言列并存**：names/descriptions 是权威的多语言 map（接口只收发它），
+// name/description 是容量层的兼容/回退列（由多语言 map 的 zh-CN 派生，000004 刻意不 DROP）；
+// topics.language 同样保留（恒为空串，历史值 000003 已丢，不参与任何读取）。
 //
 // 外键目标 schema 用 SCHEMA. 占位：老表指向 modules.*，新表指向 community.*，
 // 这是唯一允许的差异。community.favorites 不在本表内（见 favorites 的对齐测试）。
 var frozenTableDefs = map[string]map[string]string{
 	"community.boards": {
 		"code":         "code text primary key",
+		"names":        "names jsonb not null default '{}'::jsonb",
+		"descriptions": "descriptions jsonb not null default '{}'::jsonb",
 		"name":         "name text not null default ''",
 		"description":  "description text not null default ''",
 		"color":        "color text not null default 'emerald'",
@@ -32,6 +40,7 @@ var frozenTableDefs = map[string]map[string]string{
 		"author_name":      "author_name text not null default ''",
 		"title":            "title text not null",
 		"body":             "body text not null",
+		"language":         "language text not null default ''",
 		"entity_id":        "entity_id uuid",
 		"is_pinned":        "is_pinned boolean not null default false",
 		"is_locked":        "is_locked boolean not null default false",

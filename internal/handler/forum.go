@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -22,31 +23,79 @@ import (
 //
 // 数据只落本服务的 community schema，不触碰目录库实体表。
 
-// defaultBoards 是首次运行播种的板块。名称与描述是**单语言字段**（用户决议 2026-09-16：
-// 论坛不再分语言），这里用站点主语言中文；前端直接展示服务端给的值，不再按 locale 取映射。
-var defaultBoards = []struct {
-	Code        string
-	Name        string
-	Description string
-	Color       string
-	Icon        string
-	Order       int
-	InFeed      bool
-}{
-	{"announcement", "站点公告", "站点公告与运营通知", "amber", "Megaphone", 10, true},
-	{"casual", "闲聊杂谈", "轻松闲聊与日常交流", "purple", "Coffee", 20, true},
-	{"qa", "求助答疑", "使用问题、编目与功能答疑", "teal", "Hash", 30, true},
-	{"reviews", "考据评注", "版本考证、原盘评析与文献释读", "emerald", "BookOpen", 40, true},
-	{"bug_report", "反馈与建议", "缺陷反馈、功能建议与复现信息", "rose", "Bug", 50, true},
-	{"comment", "评论专用", "作品与讨论的评论承载区，不进入信息流", "sky", "MessageCircle", 60, false},
+// boardLocales 是板块名称与描述必须齐备的语种（命名四语铁律），与目录侧的
+// requiredNameLocales 同一口径，只是显式写出 ja-JP 而不接受 ja 别名（community 只有这一个写入口）。
+var boardLocales = []string{"zh-CN", "zh-TW", "ja-JP", "en-US"}
+
+func newLocalizedText(zhCN, zhTW, jaJP, enUS string) map[string]string {
+	return map[string]string{"zh-CN": zhCN, "zh-TW": zhTW, "ja-JP": jaJP, "en-US": enUS}
 }
 
+// defaultBoards 是首次运行播种的板块：名称与描述是**多语言 map**（四语齐备）。
+//
+// 接口不再有语言维度（发帖体与主题列表都没有 language），但字段本身保留：板块名/描述按语种存，
+// 前端按显示语言取键、缺键时走自己的回退链；服务端不替客户端解析成单一语言。
+var defaultBoards = []struct {
+	Code         string
+	Names        map[string]string
+	Descriptions map[string]string
+	Color        string
+	Icon         string
+	Order        int
+	InFeed       bool
+}{
+	{"announcement", newLocalizedText("站点公告", "站點公告", "サイトのお知らせ", "Site Announcements"), newLocalizedText("站点公告与运营通知", "站點公告與營運通知", "サイトのお知らせと運営からの連絡", "Site announcements and operational notices"), "amber", "Megaphone", 10, true},
+	{"casual", newLocalizedText("闲聊杂谈", "閒聊雜談", "雑談・おしゃべり", "Casual Talk"), newLocalizedText("轻松闲聊与日常交流", "輕鬆閒聊與日常交流", "気軽な雑談と日々の交流", "Light chat and everyday conversation"), "purple", "Coffee", 20, true},
+	{"qa", newLocalizedText("求助答疑", "求助答疑", "質問・相談", "Questions & Help"), newLocalizedText("使用问题、编目与功能答疑", "使用問題、編目與功能答疑", "使い方・編目・機能についての質問", "Usage, cataloging and feature questions"), "teal", "Hash", 30, true},
+	{"reviews", newLocalizedText("考据评注", "考據評註", "考証・評注", "Research & Annotation"), newLocalizedText("版本考证、原盘评析与文献释读", "版本考證、原盤評析與文獻釋讀", "版の考証・原盤評析・文献の読み解き", "Edition research, source analysis and textual annotation"), "emerald", "BookOpen", 40, true},
+	{"bug_report", newLocalizedText("反馈与建议", "回饋與建議", "フィードバック", "Feedback & Suggestions"), newLocalizedText("缺陷反馈、功能建议与复现信息", "缺陷回饋、功能建議與重現資訊", "不具合の報告・機能提案・再現情報", "Bug reports, feature requests and reproductions"), "rose", "Bug", 50, true},
+	{"comment", newLocalizedText("评论专用", "評論專用", "コメント専用", "Comments Only"), newLocalizedText("作品与讨论的评论承载区，不进入信息流", "作品與討論的評論承載區，不進入動態流", "作品・議論のコメント専用領域（フィードには出さない）", "Comment area for works and discussions; excluded from the feed"), "sky", "MessageCircle", 60, false},
+}
+
+// encodeLocales 把语种 map 编成 jsonb 参数：lib/pq 两头都不认 map（写参报 unsupported type，
+// 读列报 unsupported Scan … into type *map[string]string），所以读写都过一遍 JSON 文本，
+// 落库/读出时由 SQL 的 jsonb 类型与 encoding/json 各自负责解析。
+func encodeLocales(value map[string]string) (string, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+// decodeLocales 把 jsonb 列读成语种 map。空值（NULL / 空串）与空对象都按空 map 处理：
+// 列是 NOT NULL，只可能来自"还没写过值"的历史行。
+func decodeLocales(raw string) (map[string]string, error) {
+	out := map[string]string{}
+	if strings.TrimSpace(raw) == "" {
+		return out, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = map[string]string{}
+	}
+	return out, nil
+}
+
+// seedForum 写多语言列，并按同一套派生规则（zh-CN 优先）同步单值回退列——播种也是写入路径，
+// 不能让种子板块的单值列永远空着（那会让"单值列是派生回退值"这条不变量出现例外）。
 func seedForum(ctx context.Context, db *sql.DB) error {
 	for _, b := range defaultBoards {
-		if _, err := db.ExecContext(ctx, `
-			INSERT INTO community.boards(code,name,description,color,icon,sort_order,is_enabled,show_in_feed)
-			VALUES($1,$2,$3,$4,$5,$6,true,$7) ON CONFLICT (code) DO NOTHING`,
-			b.Code, b.Name, b.Description, b.Color, b.Icon, b.Order, b.InFeed); err != nil {
+		names, err := encodeLocales(b.Names)
+		if err != nil {
+			return err
+		}
+		descriptions, err := encodeLocales(b.Descriptions)
+		if err != nil {
+			return err
+		}
+		if _, err = db.ExecContext(ctx, `
+			INSERT INTO community.boards(code,names,descriptions,name,description,color,icon,sort_order,is_enabled,show_in_feed)
+			VALUES($1,$2::jsonb,$3::jsonb,$4,$5,$6,$7,$8,true,$9) ON CONFLICT (code) DO NOTHING`,
+			b.Code, names, descriptions, aggregateLocale(b.Names), aggregateLocale(b.Descriptions),
+			b.Color, b.Icon, b.Order, b.InFeed); err != nil {
 			return err
 		}
 	}
@@ -62,27 +111,36 @@ const commentBoard = "comment"
 // 窗口在 Go 侧过滤，避免无上限地把整表读进内存。
 const feedScanCap = 500
 
+// forumBoard 是板块的对外形状。names/descriptions 是四语 map，服务端不做单语解析；
+// name/description 是**兼容/回退单值列**（容量层保留，值由多语言 map 的 zh-CN 派生），
+// 老前端只认单值时仍然有值可显示，但写入只认 names/descriptions。
 type forumBoard struct {
-	Code        string `json:"code"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Color       string `json:"color"`
-	Icon        string `json:"icon"`
-	SortOrder   int    `json:"sort_order"`
-	IsEnabled   bool   `json:"is_enabled"`
-	ShowInFeed  bool   `json:"show_in_feed"`
+	Code         string            `json:"code"`
+	Names        map[string]string `json:"names"`
+	Descriptions map[string]string `json:"descriptions"`
+	Name         string            `json:"name"`
+	Description  string            `json:"description"`
+	Color        string            `json:"color"`
+	Icon         string            `json:"icon"`
+	SortOrder    int               `json:"sort_order"`
+	IsEnabled    bool              `json:"is_enabled"`
+	ShowInFeed   bool              `json:"show_in_feed"`
 }
 
+// boardCols 是板块的 SELECT / RETURNING 列清单，列表接口与管理接口共用同一份顺序，
+// 避免两处列不同步导致 scanBoardRow 静默串列。
+const boardCols = "code,names,descriptions,name,description,color,icon,sort_order,is_enabled,show_in_feed"
+
 func (h *Handler) listBoards(ctx context.Context) ([]forumBoard, error) {
-	rows, err := h.db.QueryContext(ctx, `SELECT code,name,description,color,icon,sort_order,is_enabled,show_in_feed FROM community.boards ORDER BY sort_order,code`)
+	rows, err := h.db.QueryContext(ctx, "SELECT "+boardCols+" FROM community.boards ORDER BY sort_order,code")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []forumBoard{}
 	for rows.Next() {
-		var b forumBoard
-		if err := rows.Scan(&b.Code, &b.Name, &b.Description, &b.Color, &b.Icon, &b.SortOrder, &b.IsEnabled, &b.ShowInFeed); err != nil {
+		b, err := scanBoardRow(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, b)

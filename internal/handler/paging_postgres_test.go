@@ -51,8 +51,9 @@ func TestPaginationWindowsAgainstPostgres(t *testing.T) {
 	cleanup()
 	t.Cleanup(cleanup)
 
-	if _, err = db.ExecContext(ctx, `INSERT INTO community.boards(code,name,description,color,icon,sort_order,is_enabled,show_in_feed)
-		VALUES($1,'分页探针板块','','slate','Hash',999,true,false)`, probeBoard); err != nil {
+	if _, err = db.ExecContext(ctx, `INSERT INTO community.boards(code,names,descriptions,color,icon,sort_order,is_enabled,show_in_feed)
+		VALUES($1,$2::jsonb,'{}'::jsonb,'slate','Hash',999,true,false)`,
+		probeBoard, `{"zh-CN":"分页探针板块"}`); err != nil {
 		t.Fatalf("插入探针板块: %v", err)
 	}
 	// 主题列表按 last_activity_at DESC 排序：让越靠前的越新，顺序确定。

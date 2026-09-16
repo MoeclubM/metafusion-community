@@ -93,7 +93,8 @@ func TestForumEndpointsAgainstPostgres(t *testing.T) {
 		t.Fatalf("板块列表 HTTP %d: %s", w.Code, w.Body.String())
 	}
 	var boards []struct {
-		Code string `json:"code"`
+		Code  string            `json:"code"`
+		Names map[string]string `json:"names"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &boards); err != nil {
 		t.Fatalf("板块列表应为裸数组: %v %s", err, w.Body.String())
@@ -108,6 +109,14 @@ func TestForumEndpointsAgainstPostgres(t *testing.T) {
 	for _, want := range []string{"qa", commentBoard} {
 		if !codes[want] {
 			t.Fatalf("板块列表缺少种子板块 %s: %s", want, w.Body.String())
+		}
+	}
+	// 板块名走多语言列：接口不再做单语解析，四语都要在（缺键由前端自己的回退链兜底）。
+	for _, b := range boards {
+		for _, locale := range boardLocales {
+			if strings.TrimSpace(b.Names[locale]) == "" {
+				t.Fatalf("板块 %s 缺少语种 %s 的名称: %v", b.Code, locale, b.Names)
+			}
 		}
 	}
 
