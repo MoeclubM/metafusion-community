@@ -142,6 +142,5 @@
   "admin.err.upstream": "コミュニティサービスに到達できません（{status}）。",
   "admin.err.network": "リクエストに失敗しました：{message}",
   "admin.err.unknownCode": "未対応のエラーコード {code}（HTTP {status}）",
-  "admin.err.fourLocales": "名称/説明は 4 言語すべて必須です。不足：{locales}",
-  "admin.board.deleteConfirmTitle": "トピックを削除"
+  "admin.err.fourLocales": "名称/説明は 4 言語すべて必須です。不足：{locales}"
 }

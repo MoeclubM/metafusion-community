@@ -13,6 +13,7 @@ import { updateBoard } from "@/lib/api/boards";
 import {
   BOARD_COLORS,
   BOARD_ICON_SUGGESTIONS,
+  BOARD_LOCALES,
   checkLocaleMap,
   diffBoardPatch,
   isKnownColor,
@@ -25,7 +26,6 @@ import {
 } from "@/lib/boards";
 import { describeError } from "@/lib/errors";
 import { formatLocaleList } from "@/lib/locales";
-import { BOARD_LOCALES } from "@/lib/boards";
 import { COMMUNITY_BOARD_MANAGE } from "@/lib/permissions";
 import { Button, ConfirmDialog, Field, Modal, Notice, Select, TextInput, Toggle } from "./ui";
 

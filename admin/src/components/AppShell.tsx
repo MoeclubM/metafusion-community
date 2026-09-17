@@ -5,6 +5,7 @@ import { useI18n } from "@/lib/i18n/provider";
 import { localeLabels, locales, type Locale } from "@/lib/i18n/routing";
 import { useSession } from "@/lib/session-context";
 import { describeError, formatLocaleList } from "@/lib/errors";
+import { LOGIN_PATH, signInHrefOnce } from "@/lib/sign-in";
 import { COMMUNITY_BOARD_MANAGE, COMMUNITY_POST_MODERATE, COMMUNITY_TOPIC_PIN } from "@/lib/permissions";
 import { BoardsPanel } from "./BoardsPanel";
 import { TopicsPanel } from "./TopicsPanel";
@@ -30,6 +31,12 @@ export function AppShell() {
   const { status, user, error, reload, can } = useSession();
   const [tab, setTab] = useState<TabId | "">("");
   const [reloadKey, setReloadKey] = useState(0);
+  // 首帧恒定 /login（服务端没有 location），挂载后再补上一次性算出的回跳参数。
+  const [signInHref, setSignInHref] = useState<string>(LOGIN_PATH);
+
+  useEffect(() => {
+    setSignInHref(signInHrefOnce());
+  }, []);
 
   const allowed = useMemo(() => {
     const map: Record<string, boolean> = {};
@@ -104,7 +111,7 @@ export function AppShell() {
           {status === "anonymous" ? (
             <div className="flex flex-wrap items-center justify-between gap-3">
               <p className="text-xs text-muted">{t("admin.session.anonymous")}</p>
-              <a className="text-xs" href="/login">
+              <a className="text-xs" href={signInHref}>
                 {t("admin.session.goSignIn")}
               </a>
             </div>

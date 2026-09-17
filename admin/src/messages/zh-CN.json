@@ -142,6 +142,5 @@
   "admin.err.upstream": "互动服务不可达或返回 {status}。",
   "admin.err.network": "请求失败：{message}",
   "admin.err.unknownCode": "未解释的错误码 {code}（HTTP {status}）",
-  "admin.err.fourLocales": "名称/描述必须四语齐备，还缺：{locales}。",
-  "admin.board.deleteConfirmTitle": "删除主题"
+  "admin.err.fourLocales": "名称/描述必须四语齐备，还缺：{locales}。"
 }

@@ -51,9 +51,14 @@ npm ci
 npm run dev        # http://127.0.0.1:3000/admin/community
 ```
 
-开发时页面上的 `/api/*` 请求由 `next.config.mjs` 的 rewrite 转给网关（默认 `http://127.0.0.1:8080`，
-可用 `API_ORIGIN` 覆盖）；生产形态是同源网关路径，不需要 rewrite。
+客户端的接口请求一律是**根路径** `/api/*`——生产形态就是同源网关，这正是它该有的样子。
+因此**本机单跑 `next dev` 只能看 UI**：没有网关时 `/api/*` 会 404（`basePath` 会给 rewrite 源加前缀，
+配一条 rewrite 也转不到根路径，所以本应用不配 rewrite）。要联调接口就把整套跑在网关后面
+（`deploy/docker-compose.yml` 的 dev 栈），或另想办法把网关挂到同源。
+
 登录态与站点共用：先在站点登录（`mf_session` cookie 或 `localStorage.metafusion_token`），再打开本页。
+未登录时页面只显示"去站点登录"，链接会带上一次性的 `?redirect=`（只对本应用路径、且只算一次，
+避免登录页回跳套娃）。
 
 ### 验证
 
@@ -63,7 +68,28 @@ npm test                         # Node 内置测试运行器跑 tests/*.test.ts
 npm run build                    # 生产构建（standalone）
 ```
 
-测试覆盖：权限判定口径、四语校验与补丁差分、错误码翻译、四语字典键集合与占位符一致性。
+测试覆盖：权限判定口径、四语校验与补丁差分、错误码翻译、登录回跳地址、四语字典键集合与占位符一致性。
+
+### 路由矩阵（实测，standalone 产物）
+
+按 `Dockerfile` 的 runner 布局补齐 `.next/static`/`public` 后起 `node .next/standalone/server.js`，
+逐条打（不跟随重定向）：
+
+| 路径 | 状态 |
+| --- | --- |
+| `/admin/community` | 200 |
+| `/admin/community/` | 200 |
+| `/admin/community/api/health` | 200（`{"status":"ok","service":"community-admin",…}`） |
+| `/admin/community/api/health/` | 200 |
+| `/admin/community/nope`（及带尾斜杠） | 404 |
+| `/`、`/admin`、`/api/community/boards` | 404（本应用只认自己的前缀；`/api/*` 归网关） |
+| `/admin/community/_next/static/…` | 200 |
+
+`next dev` 起来后 `/admin/community`、`/admin/community` 与健康端点同样 200（UI 可用，接口仍需网关）。
+
+> 注：本应用是 `output: "standalone"`，生产入口是 `node .next/standalone/server.js`（Dockerfile 的 CMD）；
+> `next start` 在 standalone 产物上会给出不支持告警，别拿它当生产入口。
+
 界面本身（浏览器里的点击流）尚未实测，见「未验证」。
 
 ## 容器
@@ -76,6 +102,10 @@ curl -i http://127.0.0.1:3000/admin/community/api/health
 ```
 
 `NEXT_PUBLIC_API_BASE` 是**构建期**参数（默认空 = 同源），运行期改它无效。
+
+构建上下文是**仓库根**，所以生效的是仓库根的 `.dockerignore`（`admin/.dockerignore` 只是给
+"以 admin/ 为上下文"的临时构建兜底）；它同时管住本仓库 Go 镜像的 `COPY . .`，
+因此只排除 `.git`、`admin/node_modules`、`admin/.next` 这些产物与元数据。
 
 ## 宿主需要接入的东西（本仓库不改网关与编排）
 

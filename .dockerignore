@@ -1,0 +1,9 @@
+# 主编排给这三个后台服务的 build.context 是**仓库根**（${MF_COMMUNITY_DIR:-../../metafusion-community}），
+# dockerfile 才是 admin/Dockerfile —— 因此这份文件必须放在仓库根，admin/.dockerignore 不会生效。
+# 同时它也是本仓库 Go 镜像（根 Dockerfile 的 COPY . .）的过滤清单，所以只排除构建产物与元数据，
+# 不排除 Go 源码、迁移文件与 admin 的源码。
+.git
+.github
+admin/node_modules
+admin/.next
+admin/npm-debug.log

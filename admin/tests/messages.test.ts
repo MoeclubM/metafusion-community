@@ -33,7 +33,7 @@ test("四语字典键集合完全一致", () => {
 
 test("每条文案都非空，且同一键的占位符四语一致", () => {
   const zh = load("zh-CN");
-  for (const [key, value] of Object.entries(zh)) {
+  for (const value of Object.values(zh)) {
     assert.notEqual(value.trim(), "");
   }
   for (const locale of locales.slice(1)) {

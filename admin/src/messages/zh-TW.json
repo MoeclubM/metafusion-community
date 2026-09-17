@@ -142,6 +142,5 @@
   "admin.err.upstream": "互動服務無法連線或回傳 {status}。",
   "admin.err.network": "請求失敗：{message}",
   "admin.err.unknownCode": "未解釋的錯誤碼 {code}（HTTP {status}）",
-  "admin.err.fourLocales": "名稱/描述必須四語齊備，還缺：{locales}。",
-  "admin.board.deleteConfirmTitle": "刪除主題"
+  "admin.err.fourLocales": "名稱/描述必須四語齊備，還缺：{locales}。"
 }
