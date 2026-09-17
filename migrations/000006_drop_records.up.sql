@@ -1,0 +1,14 @@
+-- 删除 community.records（用户互动记录：收藏、评分、进度、持有）。
+--
+-- 判据（2026-09-26 清理，四个前端 + 三个后端仓全量 grep 后的结论）：
+--   1. 唯一的读写方是本服务自己的 GET/PUT /api/records/entities/:id，两条路由已随本批次删除；
+--      收藏本来就只有一个写入口 community.favorites（/api/favorites/toggle），
+--      records.document 里的 favorite 字段从未被任何前端写入，两张表各自有写入口只会状态不一致。
+--   2. 评分 / 进度 / 持有从来没有第二个消费方：目录服务、账号服务、存储服务与四个前端都不读它。
+--   3. 主仓库的 modules.records 已随 modules schema 整层退役
+--      （deploy/sql/retire-legacy-schemas.sql），因此数据搬运工具里的 records 步骤
+--      早已只会打印 skip，不构成保留这张表的理由。
+--   4. 开发实例上该表恒为 0 行。
+--
+-- 幂等：DROP TABLE IF EXISTS；runner 应用过本版本后直接跳过。
+DROP TABLE IF EXISTS community.records;

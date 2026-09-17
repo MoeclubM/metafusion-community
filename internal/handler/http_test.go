@@ -193,7 +193,6 @@ func TestAuthBoundaryBeforeDatabase(t *testing.T) {
 		{http.MethodPost, "/api/community/entities/" + uuid.NewString() + "/posts"},
 		{http.MethodPost, "/api/favorites/toggle"},
 		{http.MethodGet, "/api/favorites/mine"},
-		{http.MethodPut, "/api/records/entities/" + uuid.NewString()},
 	} {
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))

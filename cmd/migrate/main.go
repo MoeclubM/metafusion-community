@@ -2,7 +2,7 @@
 //
 // 两个方向都要有，切流才是真的可回滚：
 //
-//	forward（默认）主仓库 → 互动服务：切流前把 modules.forum_* / modules.records / catalog.favorites
+//	forward（默认）主仓库 → 互动服务：切流前把 modules.forum_* / catalog.favorites
 //	                 搬到 community.*，切流后互动服务成为唯一写入方；
 //	back            互动服务 → 主仓库：切流后若要回退，先把互动服务这几小时写入的行搬回去，
 //	                 再把网关指回单体，避免"回滚后新数据看不见"。
@@ -31,7 +31,7 @@ import (
 // step 描述一步搬运：源 schema + 源表 + 目标 SQL。
 type step struct {
 	name string
-	// schema 是**源**表所在 schema；留空表示 modules（论坛与记录的老家）。
+	// schema 是**源**表所在 schema；留空表示 modules（论坛表的老家）。
 	schema string
 	// table 是源表名；留空表示与 name 同名（反向搬运时生效）。
 	table string
@@ -76,8 +76,6 @@ var forwardSteps = []step{
 		after: fmt.Sprintf(setTagsSeq, "community", "community")},
 	{name: "topic_tags", table: "forum_topic_tags", sql: `INSERT INTO community.topic_tags(topic_id,tag_id) SELECT topic_id,tag_id FROM modules.forum_topic_tags
 		ON CONFLICT DO NOTHING`},
-	{name: "records", sql: `INSERT INTO community.records(owner_id,entity_id,document) SELECT owner_id,entity_id,document FROM modules.records
-		ON CONFLICT (owner_id,entity_id) DO NOTHING`},
 	{name: "favorites", schema: "catalog", sql: `INSERT INTO community.favorites(user_id,target_type,target_id,created_at)
 		SELECT user_id,target_type,target_id,created_at FROM catalog.favorites
 		ON CONFLICT (user_id,target_type,target_id) DO NOTHING`},
@@ -110,8 +108,6 @@ var backSteps = []step{
 		after: fmt.Sprintf(setTagsSeq, "modules", "modules")},
 	{name: "topic_tags", schema: "community", sql: `INSERT INTO modules.forum_topic_tags(topic_id,tag_id) SELECT topic_id,tag_id FROM community.topic_tags
 		ON CONFLICT DO NOTHING`},
-	{name: "records", schema: "community", sql: `INSERT INTO modules.records(owner_id,entity_id,document) SELECT owner_id,entity_id,document FROM community.records
-		ON CONFLICT (owner_id,entity_id) DO NOTHING`},
 	{name: "favorites", schema: "community", sql: `INSERT INTO catalog.favorites(user_id,target_type,target_id,created_at)
 		SELECT user_id,target_type,target_id,created_at FROM community.favorites
 		ON CONFLICT (user_id,target_type,target_id) DO NOTHING`},

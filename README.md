@@ -1,12 +1,12 @@
 # MetaFusion Community
 
-MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目短评与用户互动记录（收藏、评分、进度、持有）。
+MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目短评、收藏与私信。
 
 拆分基准见主仓库 [docs/architecture/service-split-migration.md](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/service-split-migration.md) 的 P2 阶段。
 
 ## 职责边界
 
-- **拥有**：论坛板块/主题/回复/标签、条目短评（评论板块）、用户互动记录（`community.records`）、
+- **拥有**：论坛板块/主题/回复/标签、条目短评（评论板块）、
   私信（`community.direct_messages`，见「私信」一节）。
 - **不拥有**：账号与令牌（令牌只由账号服务签发，本服务只验签；存量不透明令牌也问账号服务）、
   实体元数据（问目录服务，不复制、不 JOIN）。
@@ -20,7 +20,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 绝大多数路径与请求/响应形状与原单体 `modules` 包**逐字一致**，切流时前端零改动；已知例外只有一处，
 见下面「语言维度只去接口层」。已切流（2026-09-14，开发实例）：
-网关把 `/api/community/*`、`/api/favorites/*`、`/api/records/*`、`^/api/users/[^/]+/favorites$` 指到本服务。
+网关把 `/api/community/*`、`/api/favorites/*`、`^/api/users/[^/]+/favorites$` 指到本服务。
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
@@ -48,8 +48,6 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 | GET | `/api/users/{id}/stats` | 匿名 | 用户互动统计（主题 / 楼中回复 / 收藏），`{"stats":{…}}`；口径见「用户互动统计」 |
 | GET | `/api/messages/with/{id}` | 登录 | 与某人的私信会话（`page`/`page_size`，缺省 20、上限 100，按时间**倒序**）；`{"items":[{id,sender_id,recipient_id,body,created_at}],"total":N}` |
 | POST | `/api/messages/with/{id}` | 登录 | 发私信（`{"body":"…"}`；裁剪两侧空白后必须非空、不超过 4000 **字符**，否则 400 `invalid_body`；给自己发 400 `invalid_recipient`）→ `{"message":{…}}` |
-| GET | `/api/records/entities/{id}` | 登录 | 本人的互动记录 |
-| PUT | `/api/records/entities/{id}` | 登录 | 写入互动记录（评分/进度/持有） |
 
 论坛主题与"实体短评"共用同一张 `community.topics`，靠板块区分语义：评论锚定实体、无独立标题、不进信息流；
 主题有标题、可独立成文、进信息流（`show_in_feed`）。
@@ -111,7 +109,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 - 不存在的用户与"没有互动记录的用户"都返回 0：账号数据不归本服务，这里不查账号库（只看 uuid 字面量）。
 
 **网关分流已就位**（主仓库 `deploy/nginx.conf`，提交 `7ab2f97`）：`/api/community/*`、`/api/favorites/*`、
-`/api/records/*`、`^/api/users/[^/]+/favorites$`、`^/api/users/[^/]+/stats$` 与 `/api/messages/` 全部分流到本服务
+`^/api/users/[^/]+/favorites$`、`^/api/users/[^/]+/stats$` 与 `/api/messages/` 全部分流到本服务
 （`community:8083`）；`/api/users/:id` 归账号服务、`/api/users/:id/contributions` 落目录服务兜底。
 主仓库的 `scripts/check_gateway_matrix.py` 会强制矩阵与契约表对齐，漏一条会红，所以这里不再需要人工提醒。
 
@@ -174,7 +172,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
   给单值开一条写入口等于在接口层把语言维度装回来，还会让"这次到底改了哪个语种"说不清；
   前端本来就按 `DynamicNamesEditor` 那类四语编辑器提交 map。
 
-本服务拥有 `community` schema，表结构与主仓库 `modules` 包中的 `forum_*` / `records` **逐列一致**，
+本服务拥有 `community` schema，表结构与主仓库 `modules` 包中的 `forum_*` **逐列一致**，
 因此切流前可用附带的一次性导入工具搬运数据，不需要字段映射：
 
 ```bash
@@ -196,7 +194,7 @@ go run cmd/migrate -direction back
 
 - 幂等：全部 `ON CONFLICT DO NOTHING`，失败重跑安全；
 - **只读旧表**：不删除、不修改 `modules.*`，因此切流前随时可以取消，回滚只需把网关指回单体；
-- 顺序 `boards → topics → posts → tags → topic_tags → records → favorites`，满足外键依赖；
+- 顺序 `boards → topics → posts → tags → topic_tags → favorites`，满足外键依赖；
   唯一跨 schema 的步骤是收藏（源表在主仓库的 `catalog.favorites`）；
 - 迁移窗口：切流前单体仍在写入，因此**切流时再跑一次**补齐增量。
 
@@ -225,7 +223,7 @@ COMMUNITY_TEST_DSN='postgres://user:pass@127.0.0.1:5432/metafusion_community_tes
 
 ## 迁移状态
 
-- 主仓库仍提供 `/api/community/*` 与 `/api/records/*`（当前线上流量入口），本服务为切流目标；
+- 主仓库仍提供 `/api/community/*`（当前线上流量入口），本服务为切流目标；
   两者共用同一份表结构的复制体，切流前靠 `cmd/migrate` 同步，切流后旧实现随 `modules` 包下线。
 - 实体合并（`entity.merged`）后的引用改写：旧实现由单体订阅 outbox 完成；本服务的增量消费
   在 P4 与跨服务事件通道一起确定，当前不消费事件。

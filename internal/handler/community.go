@@ -2,7 +2,6 @@ package handler
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -14,8 +13,8 @@ import (
 	"github.com/MoeclubM/metafusion-community/internal/auth"
 )
 
-// registerCommunity 挂载短评（评论流/条目评论）与用户互动记录。
-// 与论坛的区别：评论锚定实体、无独立标题、不进信息流；记录是私有的个人数据。
+// registerCommunity 挂载短评（评论流/条目评论）。
+// 与论坛的区别：评论锚定实体、无独立标题、不进信息流；也不承载任何私有个人数据。
 func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 	// 站点级评论流：跨实体聚合评论（评论板块），并带上被评论条目的题名。
 	// 条目元信息经目录接口批量获取，不直接 JOIN 目录表（解耦边界）。
@@ -258,44 +257,4 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 		c.JSON(200, gin.H{"items": items})
 	})
 
-	// 用户互动记录（收藏、评分、进度、持有）：私有数据，读写都要求登录，
-	// 且只允许本人访问自己的记录。
-	api.GET("/records/entities/:id", h.guard(true), func(c *gin.Context) {
-		if !h.entity(c, c.Param("id")) {
-			return
-		}
-		var b json.RawMessage
-		err := h.db.QueryRowContext(c.Request.Context(), "SELECT document FROM community.records WHERE owner_id=$1 AND entity_id=$2", h.principal(c).ID, c.Param("id")).Scan(&b)
-		if err == sql.ErrNoRows {
-			c.JSON(200, gin.H{})
-			return
-		}
-		if err != nil {
-			fail(c, 500, "module_error")
-			return
-		}
-		c.Data(200, "application/json", b)
-	})
-
-	api.PUT("/records/entities/:id", h.guard(true), func(c *gin.Context) {
-		if !h.entity(c, c.Param("id")) {
-			return
-		}
-		var in struct {
-			Favorite bool   `json:"favorite"`
-			Rating   int    `json:"rating"`
-			Progress string `json:"progress"`
-			Owned    bool   `json:"owned"`
-		}
-		if !body(c, &in) || in.Rating < 0 || in.Rating > 10 || len(in.Progress) > 1000 {
-			return
-		}
-		b, _ := json.Marshal(in)
-		_, err := h.db.ExecContext(c.Request.Context(), "INSERT INTO community.records(owner_id,entity_id,document) VALUES($1,$2,$3) ON CONFLICT(owner_id,entity_id) DO UPDATE SET document=EXCLUDED.document", h.principal(c).ID, c.Param("id"), string(b))
-		if err != nil {
-			fail(c, 500, "module_error")
-			return
-		}
-		c.JSON(200, in)
-	})
 }

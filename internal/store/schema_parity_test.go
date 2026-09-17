@@ -19,7 +19,8 @@ import (
 // topics.language 同样保留（恒为空串，历史值 000003 已丢，不参与任何读取）。
 //
 // 外键目标 schema 用 SCHEMA. 占位：老表指向 modules.*，新表指向 community.*，
-// 这是唯一允许的差异。community.favorites 不在本表内（见 favorites 的对齐测试）。
+// 这是唯一允许的差异。community.favorites 不在本表内（见 favorites 的对齐测试）；
+// community.records 原本在世，000006 已整表删除，因此也不在本表内。
 var frozenTableDefs = map[string]map[string]string{
 	"community.boards": {
 		"code":         "code text primary key",
@@ -70,11 +71,6 @@ var frozenTableDefs = map[string]map[string]string{
 		"topic_id": "topic_id uuid not null references SCHEMA.topics(id) on delete cascade",
 		"tag_id":   "tag_id bigint not null references SCHEMA.tags(id) on delete cascade",
 	},
-	"community.records": {
-		"owner_id":  "owner_id uuid not null",
-		"entity_id": "entity_id uuid not null",
-		"document":  "document jsonb not null",
-	},
 }
 
 // frozenOwnTableDefs 是本服务**自有新增**（老单体里没有）的表的终态定义，与 frozenTableDefs 分开：
@@ -107,6 +103,9 @@ var (
 	// 否则"测试看到的库"永远停在 000001 的基线形状上。
 	alterAddRe  = regexp.MustCompile(`(?is)^\s*alter table\s+([a-z_.]+)\s+add column if not exists\s+([a-z_][a-z0-9_]*)\s+(.+?)\s*$`)
 	alterDropRe = regexp.MustCompile(`(?is)^\s*alter table\s+([a-z_.]+)\s+drop column if exists\s+([a-z_][a-z0-9_]*)\s*$`)
+	// 000006 起有 DROP TABLE：整张表被删掉后不能再出现在终态里，否则"迁移文件已经删了的表"
+	// 仍会被结构测试当成存在（冻结清单里也就永远删不掉它）。
+	dropTableRe = regexp.MustCompile(`(?is)^\s*drop table if exists\s+([a-z_.]+)\s*$`)
 	// CREATE INDEX IF NOT EXISTS 名称 ON 表 (表达式清单)：索引同样要进结构测试，
 	// 否则删掉一条索引不会有任何用例失败（会话查询会安静地退化成全表扫描）。
 	// 列清单里允许嵌套括号（LEAST(...)/GREATEST(...)），所以一路取到语句末尾的右括号。
@@ -173,6 +172,10 @@ func parseSchema(t *testing.T, ddl string) map[string]map[string]string {
 			if cols, ok := out[strings.ToLower(strings.TrimSpace(m[1]))]; ok {
 				delete(cols, m[2])
 			}
+			continue
+		}
+		if m := dropTableRe.FindStringSubmatch(stmt); m != nil {
+			delete(out, strings.ToLower(strings.TrimSpace(m[1])))
 			continue
 		}
 		m := createTableRe.FindStringSubmatch(stmt)

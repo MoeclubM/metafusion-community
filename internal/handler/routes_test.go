@@ -36,7 +36,6 @@ var frozenRoutes = []string{
 	"GET /api/favorites/mine",
 	"GET /api/favorites/status",
 	"GET /api/messages/with/:id",
-	"GET /api/records/entities/:id",
 	"GET /api/users/:id/favorites",
 	"GET /api/users/:id/stats",
 	"POST /api/community/entities/:id/posts",
@@ -46,7 +45,6 @@ var frozenRoutes = []string{
 	"POST /api/messages/with/:id",
 	"PUT /api/community/boards/:code",
 	"PUT /api/community/topics/:id/pin",
-	"PUT /api/records/entities/:id",
 }
 
 func registeredRoutes(t *testing.T) []string {

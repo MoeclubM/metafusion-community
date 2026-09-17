@@ -12,7 +12,8 @@ import (
 	"github.com/MoeclubM/metafusion-community/internal/store"
 )
 
-// Handler 承载互动服务的 HTTP 契约：论坛（/api/community/*）与用户互动记录（/api/records/*）。
+// Handler 承载互动服务的 HTTP 契约：论坛（/api/community/*）、收藏与用户统计
+// （/api/favorites/*、/api/users/:id/{favorites,stats}）与私信（/api/messages/*）。
 // 路径与请求/响应形状与主仓库 modules 包逐字一致，切流时前端不需要任何改动。
 type Handler struct {
 	// db 供迁移自单体的实现直接执行 SQL（与主仓库逐字一致，便于对照回归）。
