@@ -49,3 +49,26 @@ jobs:
       - name: go test
         # -p 1：handler 与 store 两个包的回归共用同一个测试库且都会清表，串行跑避免互相清库造成偶发失败
         run: go test -p 1 ./...
+
+  admin:
+    name: admin (typecheck / test / build)
+    runs-on: ubuntu-latest
+    # 互动服务自带后台（admin/）：纯前端应用，不依赖数据库与其它服务。
+    defaults:
+      run:
+        working-directory: admin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+      - name: npm ci
+        run: npm ci --no-audit --no-fund
+      - name: typecheck
+        run: npx tsc --noEmit
+      - name: unit tests
+        run: npm test
+      - name: build
+        run: npm run build
