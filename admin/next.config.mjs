@@ -5,6 +5,8 @@ const basePath = "/admin/community";
 // 改这里要同步 nginx 的 location 与 README「宿主需要接入的东西」，否则页面能起、入口 404。
 const nextConfig = {
   reactStrictMode: true,
+  // 默认会带 X-Powered-By: Next.js（线上实测本管理台响应里就有），关掉它不改变任何行为。
+  poweredByHeader: false,
   basePath,
   // 网关对无尾斜杠的入口做 301 → /admin/community/，而 Next 默认把带尾斜杠的地址 308 回无斜杠，
   // 两者对扯就是无限重定向（ERR_TOO_MANY_REDIRECTS）。这里认领带尾斜杠的规范形式，
