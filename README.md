@@ -44,6 +44,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 | GET | `/api/favorites/status` | 匿名 | 批量查询收藏状态（未登录返回空集合） |
 | GET | `/api/favorites/mine` | 登录 | 我的收藏（分页，目标按请求者可见性过滤） |
 | GET | `/api/users/{id}/favorites` | 匿名 | 指定用户的收藏列表（公开读，目标按可见性过滤） |
+| GET | `/api/users/{id}/stats` | 匿名 | 用户互动统计（主题 / 楼中回复 / 收藏），`{"stats":{…}}`；口径见「用户互动统计」 |
 | GET | `/api/messages/with/{id}` | 登录 | 与某人的私信会话（`page`/`page_size`，缺省 20、上限 100，按时间**倒序**）；`{"items":[{id,sender_id,recipient_id,body,created_at}],"total":N}` |
 | POST | `/api/messages/with/{id}` | 登录 | 发私信（`{"body":"…"}`；裁剪两侧空白后必须非空、不超过 4000 **字符**，否则 400 `invalid_body`；给自己发 400 `invalid_recipient`）→ `{"message":{…}}` |
 | GET | `/api/records/entities/{id}` | 登录 | 本人的互动记录 |
@@ -67,9 +68,30 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 - **分页窗口**：第一页是**最近**的 20 条（按 `created_at DESC, id DESC`），往后翻是更早的；
   `total` 是整段会话的条数，不随窗口变化。
 
+### 用户互动统计
+
+用户主页要的三个数字由本服务承载（`GET /api/users/{id}/stats`，匿名可读，返回 `{"stats":{…}}`）——
+它们是**给人看的统计**，因此口径写进代码注释（`internal/store.StatsFor`），并在这里同步一份：
+
+| 字段 | 数的是什么 | 过滤条件 |
+| --- | --- | --- |
+| `topics_created` | 论坛主题 | `community.topics` 里 `author_id` 本人、且 `board_code <> 'comment'` 的行（评论板块的行是实体短评，不是主题，主题列表同样排除它） |
+| `comments_created` | 楼中回复（前端标签"互动回复"） | `community.posts` 里 `author_id` 本人的行 |
+| `favorites_count` | 公开可见的收藏 | `community.favorites` 里 `user_id` 本人的行 |
+
+两处取舍：
+
+- **短评（评论板块）不计入任何一个数字**：它既不是主题，也不在 `community.posts` 里；
+  宁可少算，也不让同一行在两个数字里各出现一次。
+- **"公开可见"就是全部收藏行**：`community` 侧没有收藏公开标记、也没有用户设置表（"收藏是否公开"
+  目前只是前端只读占位），因此这里与 `GET /api/users/{id}/favorites` 的 `total` 完全同口径
+  （目标实体自身的可见性由读取方逐条过滤，不影响计数）；真库用例直接断言两者一致。
+- 不存在的用户与"没有互动记录的用户"都返回 0：账号数据不归本服务，这里不查账号库（只看 uuid 字面量）。
+
 **网关还没跟上**：现有的分流规则只覆盖 `/api/community/*`、`/api/favorites/*`、`/api/records/*`
-与 `^/api/users/[^/]+/favorites$`，`/api/messages/*` 需要加到本服务（网关规则在主仓库的部署配置里，
-不在本仓库范围内）；加之前这两个端点会打到旧入口并 404。
+与 `^/api/users/[^/]+/favorites$`；新增的 `/api/messages/*` 与 `^/api/users/[^/]+/stats$`
+需要加到本服务（网关规则在主仓库的部署配置里，不在本仓库范围内），
+加之前这两组路径会打到旧入口并 404。
 
 **语言维度只去接口层，不去字段**（用户决议 2026-09-17）：
 
