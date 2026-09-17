@@ -88,10 +88,10 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
   （目标实体自身的可见性由读取方逐条过滤，不影响计数）；真库用例直接断言两者一致。
 - 不存在的用户与"没有互动记录的用户"都返回 0：账号数据不归本服务，这里不查账号库（只看 uuid 字面量）。
 
-**网关还没跟上**：现有的分流规则只覆盖 `/api/community/*`、`/api/favorites/*`、`/api/records/*`
-与 `^/api/users/[^/]+/favorites$`；新增的 `/api/messages/*` 与 `^/api/users/[^/]+/stats$`
-需要加到本服务（网关规则在主仓库的部署配置里，不在本仓库范围内），
-加之前这两组路径会打到旧入口并 404。
+**网关分流已就位**（主仓库 `deploy/nginx.conf`，提交 `7ab2f97`）：`/api/community/*`、`/api/favorites/*`、
+`/api/records/*`、`^/api/users/[^/]+/favorites$`、`^/api/users/[^/]+/stats$` 与 `/api/messages/` 全部分流到本服务
+（`community:8083`）；`/api/users/:id` 归账号服务、`/api/users/:id/contributions` 落目录服务兜底。
+主仓库的 `scripts/check_gateway_matrix.py` 会强制矩阵与契约表对齐，漏一条会红，所以这里不再需要人工提醒。
 
 **语言维度只去接口层，不去字段**（用户决议 2026-09-17）：
 
