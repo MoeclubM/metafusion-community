@@ -522,8 +522,9 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			ReplyToPostNumber *int   `json:"reply_to_post_number"`
 			ReplyToPostID     string `json:"reply_to_post_id"`
 		}
-		if c.ShouldBindJSON(&in) != nil {
-			fail(c, 400, "invalid_payload")
+		// 与其余写接口同一份解析助手：少了它这条路由会绕过本服务的 2MB 上限，
+		// 而网关的 client_max_body_size 是 1G，超大载荷会被整份读进内存。
+		if !body(c, &in) {
 			return
 		}
 		content := strings.TrimSpace(in.Content)
