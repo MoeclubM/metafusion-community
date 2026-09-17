@@ -32,6 +32,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 | POST | `/api/community/topics/{id}/posts` | `community.post.create` | 回帖（`post_number` 楼层、可引用楼号） |
 | DELETE | `/api/community/topics/{id}` | 作者 / `community.post.moderate` | 删主题（级联回复） |
 | DELETE | `/api/community/topics/{id}/posts/{postId}` | 作者 / `community.post.moderate` | 删回复 |
+| GET | `/api/community/posts` | `community.post.moderate` | 帖子治理列表：跨主题列楼中回复，`q` 匹配主题标题或回复正文，`page`/`page_size`（缺省 20、上限 100）→ `{"items":[…],"total":N}`；**只读，不改 `view_count`**（见「帖子治理列表」） |
 | GET | `/api/community/feed` | 匿名 | 站点级评论流（跨实体聚合，带条目标题；`q` 有界窗口过滤） |
 | GET | `/api/community/entities/{id}/posts` | 匿名 | 某实体下的短评 |
 | POST | `/api/community/entities/{id}/posts` | `community.post.create` | 发表短评 |
@@ -67,6 +68,27 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 - **`read_at` 已预留、尚未启用**：两个端点都不读不写它，落地已读回执时由收信人读会话时置位。
 - **分页窗口**：第一页是**最近**的 20 条（按 `created_at DESC, id DESC`），往后翻是更早的；
   `total` 是整段会话的条数，不随窗口变化。
+
+### 帖子治理列表
+
+`GET /api/community/posts` 是运营后台（本仓库 `admin/`，网关路径 `/admin/community`）用来**跨主题巡检回复**的端点。
+此前回复只有"删"的入口（`DELETE /api/community/topics/{id}/posts/{postId}`），要处置一条回复得先知道它在哪个主题；
+而唯一能列出某主题楼层的是主题详情 `GET /api/community/topics/{id}` —— 它会顺手把 `view_count` +1，
+拿它当检索入口等于每次排查都在篡改统计。因此本端点只读，并一次带上治理所需上下文。
+
+- **闸门**：`community.post.moderate`（与处置内容的其它入口同一码），匿名 401 `authentication_required`、缺码 403 `forbidden`。
+- **分页**：`page`/`page_size` 写法（缺省 20、上限 100，越界静默收敛），与 `/api/messages/*`、`/api/favorites/*` 同口径；
+  响应形状同样是 `{"items":[…],"total":N}`。`/api/community/topics` 的 `limit`/`offset` 属兼容期内的另一套口径
+  （见 `internal/handler/paging.go` 的说明），本次不动它，也没有在本端点上另开口子。
+- **关键词**：`q` 走 `ILIKE` 子串匹配主题标题或回复正文，与主题列表的搜索同口径。
+  **不引入 `to_tsvector`**：默认分词配置对中文按词切分的假设不成立（中文没有空格边界），
+  全文索引只会把"搜不到"变成"看起来支持却搜不到"。与 topics 列表一样，`q` 里的 `%`/`_` 会被当通配符。
+- **每一项带**：`id`、`topic_id`、`topic_title`、`board_code`、`author_id`/`author_name`（写入时的快照，
+  空快照回落 `Anonymous`）、`post_number`、`reply_to_post_number`、`excerpt` + `truncated`
+  （摘要按 **rune** 截断到 200 字，不把整篇长文搬进列表）、`created_at`/`updated_at`。
+- **与 `/community/feed` 的分工**：feed 读的是**评论板块的短评**（存在 `community.topics` 里的行，带条目标题），
+  本端点读的是**楼中回复**（`community.posts`）。两者不是同一张表——治理台的两块列表分别对应它们，不互相替代。
+- **不碰 `view_count`** 是真库用例的断言项之一（`internal/handler/posts_postgres_test.go`）。
 
 ### 用户互动统计
 
