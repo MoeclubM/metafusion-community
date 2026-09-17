@@ -16,8 +16,10 @@ import (
 // 前端与第三方客户端在切流时不需要任何改动。这个测试是"契约冻结"的执行者——
 // 任何人改动路由都会在这里失败，而不是等线上 404 才发现。
 //
-// 例外：本服务新增的两条运营写接口（置顶、板块配置）在主仓库里**没有对应实现**，
-// 它们是本次把"已声明但没落地的权限码"补成真实能力时新增的，不是切流契约的一部分。
+// 例外：本服务新增、主仓库里**没有对应实现**的端点——置顶与板块配置两条运营写接口
+// （把"已声明但没落地的权限码"补成真实能力时新增的），以及前端已在调用、四仓都没有实现的
+// 私信与用户互动统计。它们不是切流契约的一部分，但同样要进这份清单：
+// 路由是"前端调得到"的唯一保证，漏登记就会变成线上 404。
 var frozenRoutes = []string{
 	"DELETE /api/community/posts/:id",
 	"DELETE /api/community/topics/:id",
@@ -32,12 +34,14 @@ var frozenRoutes = []string{
 	"GET /api/community/topics/:id",
 	"GET /api/favorites/mine",
 	"GET /api/favorites/status",
+	"GET /api/messages/with/:id",
 	"GET /api/records/entities/:id",
 	"GET /api/users/:id/favorites",
 	"POST /api/community/entities/:id/posts",
 	"POST /api/community/topics",
 	"POST /api/community/topics/:id/posts",
 	"POST /api/favorites/toggle",
+	"POST /api/messages/with/:id",
 	"PUT /api/community/boards/:code",
 	"PUT /api/community/topics/:id/pin",
 	"PUT /api/records/entities/:id",

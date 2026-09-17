@@ -79,7 +79,7 @@ func TestApplyIsIdempotentAgainstPostgres(t *testing.T) {
 			name, checksum, files[0].name, files[0].checksum)
 	}
 
-	for _, table := range []string{"boards", "topics", "posts", "tags", "topic_tags", "favorites", "records"} {
+	for _, table := range []string{"boards", "topics", "posts", "tags", "topic_tags", "favorites", "records", "direct_messages"} {
 		var exists bool
 		if err = db.QueryRowContext(ctx,
 			"SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='community' AND table_name=$1)",

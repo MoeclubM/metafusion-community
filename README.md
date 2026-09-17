@@ -6,7 +6,8 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 ## 职责边界
 
-- **拥有**：论坛板块/主题/回复/标签、条目短评（评论板块）、用户互动记录（`community.records`）。
+- **拥有**：论坛板块/主题/回复/标签、条目短评（评论板块）、用户互动记录（`community.records`）、
+  私信（`community.direct_messages`，见「私信」一节）。
 - **不拥有**：账号与令牌（令牌只由账号服务签发，本服务只验签；存量不透明令牌也问账号服务）、
   实体元数据（问目录服务，不复制、不 JOIN）。
 - **收藏**：`community.favorites`（表结构与原 `catalog.favorites` 逐列一致，便于一次性导入），
@@ -43,11 +44,32 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 | GET | `/api/favorites/status` | 匿名 | 批量查询收藏状态（未登录返回空集合） |
 | GET | `/api/favorites/mine` | 登录 | 我的收藏（分页，目标按请求者可见性过滤） |
 | GET | `/api/users/{id}/favorites` | 匿名 | 指定用户的收藏列表（公开读，目标按可见性过滤） |
+| GET | `/api/messages/with/{id}` | 登录 | 与某人的私信会话（`page`/`page_size`，缺省 20、上限 100，按时间**倒序**）；`{"items":[{id,sender_id,recipient_id,body,created_at}],"total":N}` |
+| POST | `/api/messages/with/{id}` | 登录 | 发私信（`{"body":"…"}`；裁剪两侧空白后必须非空、不超过 4000 **字符**，否则 400 `invalid_body`；给自己发 400 `invalid_recipient`）→ `{"message":{…}}` |
 | GET | `/api/records/entities/{id}` | 登录 | 本人的互动记录 |
 | PUT | `/api/records/entities/{id}` | 登录 | 写入互动记录（评分/进度/持有） |
 
 论坛主题与"实体短评"共用同一张 `community.topics`，靠板块区分语义：评论锚定实体、无独立标题、不进信息流；
 主题有标题、可独立成文、进信息流（`show_in_feed`）。
+
+### 私信（DM）
+
+前端 `DirectMessageModal` 调的就是上面两条 `/api/messages/with/{id}`；此前四仓都没有实现，两个端点必然 404。
+
+- **可见性是查询结构保证的**：会话由 `(当前用户, 对方)` 一对参与者决定，SQL 用
+  `LEAST/GREATEST` 归一后等值匹配（与 `direct_messages_conversation` 索引表达式逐字一致），
+  请求里也没有"会话 id"这种能指向别人会话的输入，所以第三者的私信查出来就是空页。
+- **对方 id 只是外部引用**：账号数据归账号服务，本服务不查它的库、也不校验对方是否存在（只校验是不是 uuid）。
+  代价是收件人被删除后这些私信仍在。
+- **不能给自己发**：写接口 400 `invalid_recipient`，`CHECK(sender_id <> recipient_id)` 是同一口径的兜底；
+  读自己的会话不报错，恒为空会话。
+- **`read_at` 已预留、尚未启用**：两个端点都不读不写它，落地已读回执时由收信人读会话时置位。
+- **分页窗口**：第一页是**最近**的 20 条（按 `created_at DESC, id DESC`），往后翻是更早的；
+  `total` 是整段会话的条数，不随窗口变化。
+
+**网关还没跟上**：现有的分流规则只覆盖 `/api/community/*`、`/api/favorites/*`、`/api/records/*`
+与 `^/api/users/[^/]+/favorites$`，`/api/messages/*` 需要加到本服务（网关规则在主仓库的部署配置里，
+不在本仓库范围内）；加之前这两个端点会打到旧入口并 404。
 
 **语言维度只去接口层，不去字段**（用户决议 2026-09-17）：
 

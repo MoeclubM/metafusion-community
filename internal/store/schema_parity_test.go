@@ -77,6 +77,29 @@ var frozenTableDefs = map[string]map[string]string{
 	},
 }
 
+// frozenOwnTableDefs 是本服务**自有新增**（老单体里没有）的表的终态定义，与 frozenTableDefs 分开：
+// 那一份是"与原单体老表逐列对齐"的搬运前提，这一份只钉住自有表（目前只有私信）不被静默改动。
+// 这类表没有对照物，少一列/改类型同样只在第一次真实读写时才以 500 的形式暴露。
+var frozenOwnTableDefs = map[string]map[string]string{
+	"community.direct_messages": {
+		"id":           "id uuid primary key",
+		"sender_id":    "sender_id uuid not null",
+		"recipient_id": "recipient_id uuid not null",
+		"body":         "body text not null",
+		"created_at":   "created_at timestamptz not null default now()",
+		"read_at":      "read_at timestamptz",
+	},
+}
+
+// frozenOwnIndexes 是自有表上必须存在的索引：表达式与排序方向逐字冻结。
+//
+// 私信的会话查询全靠 direct_messages_conversation（LEAST/GREATEST 归一参与者 + 时间倒序）：
+// 索引被删、表达式换写法或 DESC 写成 ASC，查询都会退化成全表扫描 + 排序，
+// 而编译、vet 与真库用例（表太小，看不出计划差异）都不会失败。
+var frozenOwnIndexes = map[string]string{
+	"direct_messages_conversation": "community.direct_messages (least(sender_id,recipient_id), greatest(sender_id,recipient_id), created_at desc, id desc)",
+}
+
 var (
 	createTableRe = regexp.MustCompile(`(?is)^\s*create table if not exists\s+([a-z_.]+)\s*\(([\s\S]*)\)\s*$`)
 	identRe       = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
@@ -84,6 +107,10 @@ var (
 	// 否则"测试看到的库"永远停在 000001 的基线形状上。
 	alterAddRe  = regexp.MustCompile(`(?is)^\s*alter table\s+([a-z_.]+)\s+add column if not exists\s+([a-z_][a-z0-9_]*)\s+(.+?)\s*$`)
 	alterDropRe = regexp.MustCompile(`(?is)^\s*alter table\s+([a-z_.]+)\s+drop column if exists\s+([a-z_][a-z0-9_]*)\s*$`)
+	// CREATE INDEX IF NOT EXISTS 名称 ON 表 (表达式清单)：索引同样要进结构测试，
+	// 否则删掉一条索引不会有任何用例失败（会话查询会安静地退化成全表扫描）。
+	// 列清单里允许嵌套括号（LEAST(...)/GREATEST(...)），所以一路取到语句末尾的右括号。
+	createIndexRe = regexp.MustCompile(`(?is)^\s*create index if not exists\s+([a-z_][a-z0-9_]*)\s+on\s+([a-z_.]+)\s*\((.*)\)\s*$`)
 	// DO $$ ... $$; 块里是带条件的回填/守卫逻辑，不是结构声明：先整体剥掉再按分号切语句
 	// （块内的分号会让简单的切分器把一条语句切成几段）。
 	doBlockRe = regexp.MustCompile(`(?is)do\s+\$\$.*?\$\$\s*;`)
@@ -176,8 +203,48 @@ func parseSchema(t *testing.T, ddl string) map[string]map[string]string {
 
 // 建表语句必须与老表逐列一致：搬运的 SQL、双向导入工具都依赖这一点。
 func TestSchemaMatchesLegacyTableShape(t *testing.T) {
+	checkTableShapes(t, frozenTableDefs)
+}
+
+// 自有新增表（老单体没有的那张）同样要冻结，见 frozenOwnTableDefs 的说明。
+func TestSchemaMatchesOwnTableShape(t *testing.T) {
+	checkTableShapes(t, frozenOwnTableDefs)
+}
+
+// 自有表上的索引：迁移里写了什么就必须还是什么（表达式与排序方向都参与比对）。
+func TestSchemaOwnIndexesAreFrozen(t *testing.T) {
+	indexes := parseIndexes(schemaDDL(t))
+	for name, want := range frozenOwnIndexes {
+		got, ok := indexes[name]
+		if !ok {
+			t.Fatalf("迁移里没有索引 %s", name)
+		}
+		if got != want {
+			t.Fatalf("索引 %s 定义漂移：\n  期望 %s\n  实际 %s", name, want, got)
+		}
+	}
+}
+
+// parseIndexes 提取 CREATE INDEX IF NOT EXISTS 的归一形状（小写 + 空白压成单空格），
+// 返回"表 (列清单)"：换行与缩进不参与比对，方向与表达式参与。
+func parseIndexes(ddl string) map[string]string {
+	out := map[string]string{}
+	for _, stmt := range splitTopLevel(doBlockRe.ReplaceAllString(stripLineComments(ddl), ""), ";") {
+		m := createIndexRe.FindStringSubmatch(stmt)
+		if m == nil {
+			continue
+		}
+		cols := strings.Join(strings.Fields(strings.ToLower(m[3])), " ")
+		out[m[1]] = strings.ToLower(strings.TrimSpace(m[2])) + " (" + cols + ")"
+	}
+	return out
+}
+
+// checkTableShapes 比对一份冻结清单：列必须齐全、定义逐字一致、清单外不许有多余列。
+func checkTableShapes(t *testing.T, frozen map[string]map[string]string) {
+	t.Helper()
 	parsed := parseSchema(t, schemaDDL(t))
-	for table, want := range frozenTableDefs {
+	for table, want := range frozen {
 		got, ok := parsed[table]
 		if !ok {
 			t.Fatalf("建表语句缺少表 %s", table)
@@ -185,7 +252,7 @@ func TestSchemaMatchesLegacyTableShape(t *testing.T) {
 		for col, wantDef := range want {
 			gotDef, ok := got[col]
 			if !ok {
-				t.Fatalf("%s 缺少列 %s（老表定义：%s）", table, col, wantDef)
+				t.Fatalf("%s 缺少列 %s（冻结定义：%s）", table, col, wantDef)
 			}
 			if gotDef != wantDef {
 				t.Fatalf("%s.%s 定义漂移：\n  期望 %s\n  实际 %s", table, col, wantDef, gotDef)
@@ -193,7 +260,7 @@ func TestSchemaMatchesLegacyTableShape(t *testing.T) {
 		}
 		for col := range got {
 			if _, ok := want[col]; !ok {
-				t.Fatalf("%s 多出列 %s（老表没有这一列，搬运时要显式决定）", table, col)
+				t.Fatalf("%s 多出列 %s（不在冻结清单里：结构变更要同步这份清单）", table, col)
 			}
 		}
 	}
