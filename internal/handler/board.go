@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/MoeclubM/metafusion-community/internal/audit"
 	"github.com/MoeclubM/metafusion-community/internal/auth"
 )
 
@@ -171,11 +172,10 @@ func (h *Handler) registerBoards(api *gin.RouterGroup) {
 			fail(c, 400, "invalid_payload")
 			return
 		}
-		row := h.db.QueryRowContext(c.Request.Context(),
-			"UPDATE community.boards SET "+strings.Join(set, ",")+
-				" WHERE code=$1 RETURNING "+boardCols,
-			args...)
-		board, err := scanBoardRow(row.Scan)
+		// 变更前摘要：UPDATE 只给得出"之后"的值，而"把 show_in_feed 关掉"和"把颜色改了"是完全不同的两件事，
+		// 只看结果看不出来。写端点独有的那次读，契约 §3 明确允许。
+		before, err := scanBoardRow(h.db.QueryRowContext(c.Request.Context(),
+			"SELECT "+boardCols+" FROM community.boards WHERE code=$1", code).Scan)
 		if err == sql.ErrNoRows {
 			fail(c, 404, "not_found")
 			return
@@ -184,6 +184,45 @@ func (h *Handler) registerBoards(api *gin.RouterGroup) {
 			fail(c, 500, "module_error")
 			return
 		}
+		row := h.db.QueryRowContext(c.Request.Context(),
+			"UPDATE community.boards SET "+strings.Join(set, ",")+
+				" WHERE code=$1 RETURNING "+boardCols,
+			args...)
+		board, err := scanBoardRow(row.Scan)
+		if err == sql.ErrNoRows {
+			// 预读之后这一行被并发删掉了：与"不存在"同口径（板块的删除入口不在本服务，几乎不可能走到）。
+			fail(c, 404, "not_found")
+			return
+		}
+		if err != nil {
+			fail(c, 500, "module_error")
+			return
+		}
+		// 只记载荷里出现的字段的差异：没传的字段等于没动，记进去会让"这次改了什么"失真。
+		// 语种 map 只记变了的语种（理由是 auditLocaleChanges 的注释）。
+		changes := map[string]any{}
+		if in.Names != nil {
+			auditLocaleChanges("names", before.Names, board.Names, changes)
+		}
+		if in.Descriptions != nil {
+			auditLocaleChanges("descriptions", before.Descriptions, board.Descriptions, changes)
+		}
+		for field, pair := range map[string][2]any{
+			"color":        {before.Color, board.Color},
+			"icon":         {before.Icon, board.Icon},
+			"sort_order":   {before.SortOrder, board.SortOrder},
+			"is_enabled":   {before.IsEnabled, board.IsEnabled},
+			"show_in_feed": {before.ShowInFeed, board.ShowInFeed},
+		} {
+			present := map[string]bool{
+				"color": in.Color != nil, "icon": in.Icon != nil, "sort_order": in.SortOrder != nil,
+				"is_enabled": in.IsEnabled != nil, "show_in_feed": in.ShowInFeed != nil,
+			}[field]
+			if present && pair[0] != pair[1] {
+				changes[field] = auditChange(pair[0], pair[1])
+			}
+		}
+		audit.Describe(c, audit.Detail{TargetType: "board", TargetID: board.Code, Changes: changes})
 		c.JSON(200, board)
 	})
 }

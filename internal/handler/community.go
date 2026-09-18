@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/MoeclubM/metafusion-community/internal/audit"
 	"github.com/MoeclubM/metafusion-community/internal/auth"
 )
 
@@ -162,6 +163,8 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 			fail(c, 500, "module_error")
 			return
 		}
+		// 短评正文不进审计（与发主题同一口径：审计表不存请求体原文），只记它锚定哪个条目。
+		audit.Describe(c, audit.Detail{TargetType: "comment", TargetID: pid, Changes: map[string]any{"entity_id": id}})
 		c.JSON(200, gin.H{
 			"ok": true,
 			"item": map[string]any{
@@ -182,6 +185,19 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 			return
 		}
 		p := h.principal(c)
+		// 变更前摘要：锚定实体与作者在行被删掉之后就查不到了，只能先读（写端点独有的那次读）。
+		var entityID, authorID string
+		err := h.db.QueryRowContext(c.Request.Context(),
+			"SELECT COALESCE(entity_id::text,''),author_id::text FROM community.topics WHERE id=$1 AND board_code=$2",
+			id, commentBoard).Scan(&entityID, &authorID)
+		if err == sql.ErrNoRows {
+			fail(c, 404, "not_found")
+			return
+		}
+		if err != nil {
+			fail(c, 500, "module_error")
+			return
+		}
 		query := "DELETE FROM community.topics WHERE id=$1 AND board_code=$2 AND author_id=$3"
 		args := []any{id, commentBoard, p.ID}
 		// 短评与帖子同属"内容治理"：删他人的短评用 community.post.moderate（原判据是 admin 角色）。
@@ -200,6 +216,10 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 			fail(c, 404, "not_found")
 			return
 		}
+		audit.Describe(c, audit.Detail{TargetType: "comment", TargetID: id, Changes: map[string]any{
+			"entity_id": entityID, "author_id": authorID,
+			"deleted_by_moderator": p.Can(auth.PermissionPostModerate),
+		}})
 		c.JSON(200, gin.H{"ok": true})
 	})
 

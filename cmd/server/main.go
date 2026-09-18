@@ -65,7 +65,11 @@ func main() {
 		c.Next()
 	})
 
-	handler.New(db, cat, verifier).Register(r)
+	h := handler.New(db, cat, verifier)
+	h.Register(r)
+	// 退出时排空审计队列：defer 在 http.Server.Shutdown 之后执行（在途请求都已收尾），
+	// 此时关闭不会丢行；defer 顺序在 db.Close() 之前，队列排空时连接还在。
+	defer h.Close()
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "live", "service": "metafusion-community"})

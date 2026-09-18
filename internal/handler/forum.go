@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
+	"github.com/MoeclubM/metafusion-community/internal/audit"
 	"github.com/MoeclubM/metafusion-community/internal/auth"
 )
 
@@ -545,6 +546,16 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			fail(c, 500, "module_error")
 			return
 		}
+		// 审计摘要只放"身份级"字段：板块、标题、锚点实体、标签名。正文属于内容，
+		// 审计表不存请求体原文（契约 §1 的"不建的列"），要看内容去 community.topics。
+		changes := map[string]any{"board_code": in.BoardCode, "title": in.Title}
+		if entityID != "" {
+			changes["entity_id"] = entityID
+		}
+		if len(in.TagNames) > 0 {
+			changes["tag_names"] = in.TagNames
+		}
+		audit.Describe(c, audit.Detail{TargetType: "topic", TargetID: tid, Changes: changes})
 		c.JSON(200, gin.H{
 			"id": tid, "board_code": in.BoardCode, "title": in.Title, "content": in.Content,
 			"user_id": p.ID, "author_name": authorName(p), "view_count": 0, "reply_count": 0,
@@ -643,6 +654,12 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			fail(c, 500, "module_error")
 			return
 		}
+		// 回复正文同样不进审计（理由见发主题），只记楼层与被引用的楼层号。
+		changes := map[string]any{"topic_id": topicID, "post_number": next}
+		if replyTo != nil {
+			changes["reply_to_post_number"] = *replyTo
+		}
+		audit.Describe(c, audit.Detail{TargetType: "post", TargetID: pid, Changes: changes})
 		c.JSON(200, gin.H{
 			"id": pid, "topic_id": topicID, "user_id": p.ID, "author_name": authorName(p),
 			"content": content, "post_number": next, "reply_to_post_number": replyTo,
@@ -658,6 +675,21 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			return
 		}
 		p := h.principal(c)
+		// 删除不可逆，"删掉的是什么"必须留痕：删之前多读一次拿变更前摘要（只有写端点会有这次读，
+		// 契约 §3 明确允许）。读不到就是不存在，与后面的 RowsAffected 为 0 同一口径（404）。
+		var boardCode, title, authorID string
+		var replyCount int
+		err := h.db.QueryRowContext(c.Request.Context(),
+			"SELECT board_code,title,author_id::text,reply_count FROM community.topics WHERE id=$1", topicID).
+			Scan(&boardCode, &title, &authorID, &replyCount)
+		if err == sql.ErrNoRows {
+			fail(c, 404, "not_found")
+			return
+		}
+		if err != nil {
+			fail(c, 500, "module_error")
+			return
+		}
 		q := "DELETE FROM community.topics WHERE id=$1 AND author_id=$2"
 		args := []any{topicID, p.ID}
 		// 删别人的主题属"帖子治理"，对齐账号服务的 community.post.moderate：
@@ -676,6 +708,12 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			fail(c, 404, "not_found")
 			return
 		}
+		// board_code 进摘要：这条路由**不排除评论板块**（存量短评行就在 community.topics 里），
+		// 没有它就看不出删掉的是主题还是短评，两者只有 board_code 的区别。
+		audit.Describe(c, audit.Detail{TargetType: "topic", TargetID: topicID, Changes: map[string]any{
+			"board_code": boardCode, "title": title, "author_id": authorID, "reply_count": replyCount,
+			"deleted_by_moderator": p.Can(auth.PermissionPostModerate),
+		}})
 		c.JSON(200, gin.H{"ok": true})
 	})
 
@@ -691,6 +729,20 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			return
 		}
 		p := h.principal(c)
+		// 变更前摘要：楼层号与作者在删除后就查不到了（行没了），只能先读。
+		var postTopicID, postAuthorID string
+		var postNumber int
+		err := h.db.QueryRowContext(c.Request.Context(),
+			"SELECT topic_id::text,author_id::text,post_number FROM community.posts WHERE id=$1 AND topic_id=$2", postID, topicID).
+			Scan(&postTopicID, &postAuthorID, &postNumber)
+		if err == sql.ErrNoRows {
+			fail(c, 404, "not_found")
+			return
+		}
+		if err != nil {
+			fail(c, 500, "module_error")
+			return
+		}
 		q := "DELETE FROM community.posts WHERE id=$1 AND topic_id=$2 AND author_id=$3"
 		args := []any{postID, topicID, p.ID}
 		if p.Can(auth.PermissionPostModerate) {
@@ -711,6 +763,10 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			fail(c, 500, "module_error")
 			return
 		}
+		audit.Describe(c, audit.Detail{TargetType: "post", TargetID: postID, Changes: map[string]any{
+			"topic_id": postTopicID, "post_number": postNumber, "author_id": postAuthorID,
+			"deleted_by_moderator": p.Can(auth.PermissionPostModerate),
+		}})
 		c.JSON(200, gin.H{"ok": true})
 	})
 
@@ -733,6 +789,19 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			fail(c, 400, "invalid_payload")
 			return
 		}
+		// 变更前摘要：UPDATE ... RETURNING 只给得出"之后"的值，置顶前后的差异只能先读一次。
+		var wasPinned bool
+		var boardCode string
+		err := h.db.QueryRowContext(c.Request.Context(),
+			"SELECT is_pinned, board_code FROM community.topics WHERE id=$1", topicID).Scan(&wasPinned, &boardCode)
+		if err == sql.ErrNoRows {
+			fail(c, 404, "not_found")
+			return
+		}
+		if err != nil {
+			fail(c, 500, "module_error")
+			return
+		}
 		// 评论不是文章（与主题详情同一口径）：不给评论板块的条目置顶。
 		rows, err := h.db.QueryContext(c.Request.Context(),
 			`UPDATE community.topics t SET is_pinned=$2, updated_at=now() WHERE t.id=$1 AND t.board_code<>$3 RETURNING `+topicCols,
@@ -752,6 +821,9 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			fail(c, 500, "module_error")
 			return
 		}
+		audit.Describe(c, audit.Detail{TargetType: "topic", TargetID: topicID, Changes: map[string]any{
+			"board_code": boardCode, "is_pinned": auditChange(wasPinned, *in.Pinned),
+		}})
 		out := t.toMap()
 		attachTopicEntities(c.Request.Context(), h, []map[string]any{out})
 		c.JSON(200, out)

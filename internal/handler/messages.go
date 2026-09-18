@@ -6,6 +6,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+
+	"github.com/MoeclubM/metafusion-community/internal/audit"
 )
 
 // 私信（DM）：两个端点都在登录门槛（guard(true)）之后，与其它私有数据接口同一口径。
@@ -87,6 +89,11 @@ func (h *Handler) registerMessages(api *gin.RouterGroup) {
 			fail(c, 500, "module_error")
 			return
 		}
+		// 私信正文是私有内容，**绝不进审计**（不是"脱敏后可以进"的问题：审计表按设计不存请求体原文）。
+		// 被动对象是收件人，changes 只留行 id，够把审计行与 community.direct_messages 对上。
+		audit.Describe(c, audit.Detail{TargetType: "user", TargetID: peerID, Changes: map[string]any{
+			"message_id": msg.ID,
+		}})
 		c.JSON(200, gin.H{"message": msg})
 	})
 }

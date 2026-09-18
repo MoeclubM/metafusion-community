@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/MoeclubM/metafusion-community/internal/audit"
 	"github.com/MoeclubM/metafusion-community/internal/store"
 )
 
@@ -37,11 +38,18 @@ func (h *Handler) registerFavorites(api *gin.RouterGroup) {
 			fail(c, 404, "not_found")
 			return
 		}
-		favorited, err := h.store.ToggleFavorite(c.Request.Context(), h.principal(c).ID, targetType, strings.TrimSpace(in.TargetID))
+		targetID := strings.TrimSpace(in.TargetID)
+		favorited, err := h.store.ToggleFavorite(c.Request.Context(), h.principal(c).ID, targetType, targetID)
 		if err != nil {
 			fail(c, 500, "module_error")
 			return
 		}
+		// 被动对象是**被收藏的实体**（target_type 进 changes）：收藏是用户对实体的关系，
+		// 审计行按 target 查得到"这个条目被谁收藏过"。toggle 一次只有一个动作码，
+		// 收藏还是取消由 changes.favorited 表达（路由是先于响应决定的，没有第二个码可用）。
+		audit.Describe(c, audit.Detail{TargetType: "entity", TargetID: targetID, Changes: map[string]any{
+			"target_type": targetType, "favorited": favorited,
+		}})
 		c.JSON(200, gin.H{"favorited": favorited})
 	})
 
