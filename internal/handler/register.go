@@ -47,14 +47,19 @@ func (h *Handler) Close() {
 	}
 }
 
-// Register 挂载全部路由。/api 前缀下统一先挂身份中间件：
-// 读接口匿名可用（可见性由目录实体决定），写接口要求登录，运营类写接口再要求具体权限码。
+// Register 挂载全部路由。/api 前缀下先挂审计中间件、再挂身份中间件（顺序的原因见下面的注释），
+// 路由自己再按读/写收紧：读接口匿名可用（可见性由目录实体决定），写接口要求登录，
+// 运营类写接口再要求具体权限码。
 func (h *Handler) Register(r *gin.Engine) {
 	api := r.Group("/api")
-	api.Use(h.verifier.Middleware())
 	// 审计中间件必须挂在任何路由注册之前（gin 的 Use 只对之后注册的路由生效），
-	// 且挂在身份中间件之后：它要在 c.Next() 之后读 Principal 才能记下操作者。
+	// 且挂在**身份中间件之前**：身份中间件会对被拒的 PAT（401 invalid_token / 503 auth_unavailable）
+	// 直接 abort，挂在它之后这类写请求就一行审计都没有——而"凭据被拒的写请求"恰恰是最该留痕的一类。
+	// 安全性不受影响：Actor 在 c.Next() 之后读，那时身份中间件已经跑过，合法请求照样记得到操作者；
+	// 被 abort 的请求（身份根本没解析出来）记成 anonymous + http_<status>——响应里就是这个码，是事实。
+	// 顺序若被改回"身份在前"，TestAuditLogForRejectedCredentialsAgainstPostgres 会失败。
 	api.Use(h.auditMiddleware())
+	api.Use(h.verifier.Middleware())
 	h.registerForum(api)
 	h.registerCommunity(api)
 	h.registerFavorites(api)

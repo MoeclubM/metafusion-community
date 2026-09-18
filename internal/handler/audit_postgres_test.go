@@ -12,11 +12,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
 	"github.com/MoeclubM/metafusion-community/internal/audit"
 	"github.com/MoeclubM/metafusion-community/internal/auth"
+	"github.com/MoeclubM/metafusion-community/internal/catalog"
+	"github.com/MoeclubM/metafusion-community/internal/store"
+	"github.com/MoeclubM/metafusion-community/internal/testutil"
 )
 
 // 真库用例（契约 §6.2）：每个被审计动作**恰好一行**、敏感值整行零命中、失败路径留痕、
@@ -448,4 +452,92 @@ func TestAuditPermissionDeniedAgainstPostgres(t *testing.T) {
 	if row.ActorUserID != sub || row.CredentialType != audit.CredentialSession {
 		t.Fatalf("缺码请求仍要记操作者：%+v", row)
 	}
+}
+
+// TestAuditLogForRejectedCredentialsAgainstPostgres：**凭据被拒的写请求也要留痕**。
+//
+// 这条用例钉住中间件顺序：审计中间件挂在身份中间件之前（handler.Register 的注释写了原因）。
+// 身份中间件（auth.Verifier.Middleware）只对 PAT 路径 abort——形态非法/已吊销/过期 → 401
+// invalid_token，内省不可达（含未配置 AUTH_URL）→ 503 auth_unavailable；缺 Authorization 或
+// 无效 JWT 一律**按匿名继续**，由路由闸门回 401 authentication_required。因此：
+//   - 审计中间件挂在身份之后：PAT 的两种拒绝一行审计都没有（覆盖缺口）；
+//   - 挂在身份之前：两种拒绝各落一行，记 anonymous + http_<status>（响应里就是这个码，是事实），
+//     而"无效 JWT"那条走的是闸门登记的稳定码 authentication_required。
+func TestAuditLogForRejectedCredentialsAgainstPostgres(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	s, err := store.Open(ctx, testutil.DSN(t))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if err = s.Init(ctx); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	db := testutil.Database(t)
+	cleaned := []string{}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(ctx, "DELETE FROM audit.audit_log WHERE request_id = ANY($1)", pq.Array(cleaned))
+	})
+
+	// do 打一次请求，返回响应与 request_id（本用例每步都显式带 X-Request-Id）。
+	do := func(router http.Handler, method, path, payload, bearer, requestID string) (*httptest.ResponseRecorder, string) {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Request-Id", requestID)
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		cleaned = append(cleaned, requestID)
+		return w, requestID
+	}
+	// assertRejected 断言"响应是这条拒绝 + 恰好一行审计"，并返回该行供进一步断言。
+	assertRejected := func(w *httptest.ResponseRecorder, rid, code string, status int, action, errorCode string) auditRow {
+		t.Helper()
+		if w.Code != status || !strings.Contains(w.Body.String(), code) {
+			t.Fatalf("应 %d %s，实际 %d：%s", status, code, w.Code, w.Body.String())
+		}
+		row := waitAuditRows(t, ctx, db, rid, 1)[0]
+		if row.Action != action || row.Result != audit.ResultFailure || row.ErrorCode != errorCode || row.HTTPStatus != status {
+			t.Fatalf("被拒请求的审计行不符：%+v", row)
+		}
+		if row.CredentialType != audit.CredentialAnonymous || row.ActorUserID != "" || row.ActorUsername != "" {
+			t.Fatalf("身份没解析出来的行只能记匿名：%+v", row)
+		}
+		return row
+	}
+
+	// 1) 形态非法 PAT（mfp_ + 非 43 位 base62）：内省器的本地预检直接判"明确无效"，不打账号服务。
+	//    必须装配内省器——未装配（AUTH_URL 未配置）时任何 mfp_ 前缀都按依赖不可用回 503，见第 2 条。
+	withPAT := newVerifier(t, "http://127.0.0.1:1/jwks")
+	withPAT.SetPAT(auth.NewPATIntrospector("http://127.0.0.1:1"))
+	patRouter := gin.New()
+	New(s, catalog.New("", 0), withPAT).Register(patRouter)
+	w, rid := do(patRouter, http.MethodPost, "/api/community/topics", `{"board_code":"qa","title":"x","content":"y"}`,
+		auth.PATPrefix+"not-a-real-token", "rid-audit-badpat")
+	row := assertRejected(w, rid, auth.CodeInvalidToken, http.StatusUnauthorized, "topic.created", "http_401")
+	// 被身份拒绝的请求压根没进处理器，因此 route 仍是模板、也没有被动对象与摘要。
+	if _, ok := auditActions[row.RequestMethod+" "+row.Route]; !ok {
+		t.Fatalf("被拒请求的 route 也必须是登记过的模板：%+v", row)
+	}
+	if row.TargetType != "" {
+		t.Fatalf("身份拒绝发生在业务之前，不该有被动对象：%+v", row)
+	}
+
+	// 2) 账号服务不可达（这里等价于"未配置 AUTH_URL / 未装配内省器"）：形态合法的 PAT 回 503。
+	bare := newVerifier(t, "http://127.0.0.1:1/jwks")
+	bareRouter := gin.New()
+	New(s, catalog.New("", 0), bare).Register(bareRouter)
+	w, rid = do(bareRouter, http.MethodPost, "/api/favorites/toggle",
+		`{"target_type":"work","target_id":"`+uuid.NewString()+`"}`, patBearer('q'), "rid-audit-pat503")
+	assertRejected(w, rid, auth.CodeAuthUnavailable, http.StatusServiceUnavailable, "favorite.toggled", "http_503")
+
+	// 3) 无效 JWT 不 abort：按匿名继续，由路由闸门回 401，审计行记的是闸门登记的稳定码
+	//    （不是 http_401）——这条把"身份中间件只对 PAT 路径 abort"钉住。
+	w, rid = do(bareRouter, http.MethodPost, "/api/community/topics",
+		`{"board_code":"qa","title":"x","content":"y"}`, "not-a-jwt", "rid-audit-badjwt")
+	assertRejected(w, rid, "authentication_required", http.StatusUnauthorized, "topic.created", "authentication_required")
 }

@@ -179,7 +179,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 - **只记登记过的写路由**：新增写端点必须在注册表里登记动作码，否则「写路由覆盖守卫」
   （`internal/handler/audit_coverage_test.go`）失败——漏一条不会有任何其它用例报出来。
 
-三处需要知道的口径：
+四处需要知道的口径：
 
 - **本服务没有的写能力**：板块只有"改已有板块"（新增与删除由种子与后台完成，无端点）；
   没有封禁端点（封禁归账号服务）；私信的 `read_at` 列已预留但两个端点都不读不写，因此没有
@@ -188,6 +188,12 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
   契约 §7 明确"审计只记写操作"，因此它不在注册表里；这条读接口也不回写 `X-Request-Id`。
 - **`credential_type` 是近似值**：本服务只验签与内省，分不清会话令牌与 OAuth 令牌，
   只能给 `pat`（`Principal.FromPAT`）或 `session`（契约 §7 已记录）。
+- **凭据被拒的写请求也留痕**：审计中间件挂在身份中间件**之前**——身份中间件会对被拒的 PAT
+  （`401 invalid_token` / `503 auth_unavailable`）直接 abort 掉请求，挂在它之后这类写请求就一行审计
+  都没有，而"凭据被拒"恰恰是最该留痕的一类。被拒的行记 `credential_type=anonymous` +
+  `error_code=http_<status>`（响应里就是这个码，是事实）；缺 Authorization 或无效 JWT 不 abort，
+  仍按匿名进路由闸门，那类行记闸门登记的稳定码（`authentication_required` / `forbidden`）。
+  顺序不能反——真库用例 `TestAuditLogForRejectedCredentialsAgainstPostgres` 会红。
 
 读取面**不在本服务**：唯一的读取端点是账号服务的 `GET /api/admin/audit-logs`（权限码
 `auth.audit.read`），可按 `service=community`、`action`、`actor`、`target_type`/`target_id` 过滤。

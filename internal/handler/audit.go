@@ -37,6 +37,12 @@ import (
 // （板块由种子播种，见 README「板块」）；封禁不在本服务（归账号服务），本服务没有任何 ban 端点；
 // 私信的 read_at 列已预留，但两个端点都不读不写，因此没有"已读"动作码。
 //
+// **凭据被拒的写请求也留痕**：审计中间件挂在身份中间件之前（见 register.go 的 Register）。
+// 被拒的 PAT（401 invalid_token / 503 auth_unavailable）会由身份中间件 abort，这类行记
+// credential_type=anonymous + error_code=http_<status>（响应里就是这个码）；缺 Authorization 或
+// 无效 JWT 不 abort，仍按匿名进闸门，记的是闸门登记的稳定码。顺序反了这条覆盖就没了——
+// TestAuditLogForRejectedCredentialsAgainstPostgres 会红。
+//
 // 域名的选取：契约 §2 的清单里没有 favorite / message / comment 三个域（清单是"按业务对象分"
 // 的示例）。这三个对象各自独立——收藏是用户行为、私信是私有会话、短评不是主题也不是回复——
 // 塞进 entity / topic 只会让按动作码聚合时看不出究竟发生了什么。
