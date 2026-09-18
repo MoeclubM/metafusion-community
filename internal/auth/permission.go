@@ -25,6 +25,13 @@ const (
 	// 当前只覆盖"改一个已存在的板块"（names/descriptions/color/icon/排序/开关），
 	// 板块的新增与删除仍由种子与后台完成。
 	PermissionBoardManage = "community.board.manage"
+	// PermissionReportReview 审阅举报与申诉：/api/community/admin/reports* 与
+	// /api/community/admin/appeals* 用它（handler/reports.go）。
+	//
+	// 与 community.post.moderate 的分界：post.moderate 管"内容本身能不能留"（删主题/回复/短评），
+	// 举报码管"这条举报怎么处置"（受理/驳回/记录处置结论）。两者不互相蕴含：
+	// 只有 community_admin 与 community_moderator 同时持有两个码（见账号服务的系统组播种）。
+	PermissionReportReview = "community.report.review"
 
 	// permissionWildcard 是账号服务给的「全部权限」码（admin 组）。
 	permissionWildcard = "*"
@@ -39,6 +46,7 @@ var communityPermissionCodes = []string{
 	PermissionPostModerate,
 	PermissionTopicPin,
 	PermissionBoardManage,
+	PermissionReportReview,
 }
 
 // legacyOpenCodes 是老令牌（claims 里没有 permissions）在角色兜底之外仍然放行的码。

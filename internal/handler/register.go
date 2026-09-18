@@ -70,6 +70,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	h.registerBoards(api)
 	h.registerStats(api)
 	h.registerModeration(api)
+	h.registerReports(api)
 }
 
 // guard 是写操作的门槛：互动服务读接口对可见实体开放，写接口必须登录。

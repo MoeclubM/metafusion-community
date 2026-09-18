@@ -26,6 +26,15 @@ import (
 //	POST   /api/favorites/toggle                     favorite.toggled  收藏切换
 //	POST   /api/messages/with/:id                    message.sent      发私信
 //	PUT    /api/messages/with/:id/read                message.read      标记会话已读
+//	POST   /api/community/reports                      report.created    提交举报
+//	POST   /api/community/reports/:id/appeal           report_appeal.created 被处置方提交申诉
+//	POST   /api/community/admin/reports/:id/accept     report.accepted   受理举报
+//	POST   /api/community/admin/reports/:id/reject     report.rejected   驳回举报
+//	POST   /api/community/admin/reports/:id/resolve    report.resolved   处置举报（记录处置结论）
+//	POST   /api/community/admin/appeals/:id/review    report_appeal.reviewed 处理申诉
+//
+// 举报与申诉分两个域（report.* / report_appeal.*）：它们各有一条队列、各自的状态机，
+// 合成一个域会让"按动作码聚合"时分不清处理的是举报还是申诉。
 //
 // 收件箱的两条读接口（GET /api/messages/conversations、GET /api/messages/unread）是**纯读**：
 // 不置位 read_at（已读由收信人显式标记，走上面那条 PUT），因此按契约 §7「审计只记写操作」不进注册表。
@@ -51,6 +60,11 @@ import (
 // 域名的选取：契约 §2 的清单里没有 favorite / message / comment 三个域（清单是"按业务对象分"
 // 的示例）。这三个对象各自独立——收藏是用户行为、私信是私有会话、短评不是主题也不是回复——
 // 塞进 entity / topic 只会让按动作码聚合时看不出究竟发生了什么。
+//
+// 举报（F3 / 迁移 000008）同理另立两个域：report.* 是"有人投诉了什么"、report_appeal.* 是
+// "被处置方对处置结果的异议"，各有一条队列与状态机，合成一个域会让聚合时分不清处理的是哪一个。
+// 处置动作只有 report.resolved 一个码（记录处置结论）：真正的下线内容与封禁用户分别走
+// 既有的内容删除端点与账号服务的封禁端点，本服务不新增这两类动作。
 var auditActions = map[string]string{
 	"POST /api/community/topics":                     "topic.created",
 	"POST /api/community/topics/:id/posts":           "post.created",
@@ -63,6 +77,12 @@ var auditActions = map[string]string{
 	"POST /api/favorites/toggle":                     "favorite.toggled",
 	"POST /api/messages/with/:id":                    "message.sent",
 	"PUT /api/messages/with/:id/read":                "message.read",
+	"POST /api/community/reports":                    "report.created",
+	"POST /api/community/reports/:id/appeal":         "report_appeal.created",
+	"POST /api/community/admin/reports/:id/accept":   "report.accepted",
+	"POST /api/community/admin/reports/:id/reject":   "report.rejected",
+	"POST /api/community/admin/reports/:id/resolve":  "report.resolved",
+	"POST /api/community/admin/appeals/:id/review":   "report_appeal.reviewed",
 }
 
 // auditExempt 是写路由的豁免表（路由模板 → 一句理由）。当前**为空**：本服务的 10 条写路由全部

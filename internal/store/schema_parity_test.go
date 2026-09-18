@@ -74,7 +74,7 @@ var frozenTableDefs = map[string]map[string]string{
 }
 
 // frozenOwnTableDefs 是本服务**自有新增**（老单体里没有）的表的终态定义，与 frozenTableDefs 分开：
-// 那一份是"与原单体老表逐列对齐"的搬运前提，这一份只钉住自有表（目前只有私信）不被静默改动。
+// 那一份是"与原单体老表逐列对齐"的搬运前提，这一份只钉住自有表（私信、举报与申诉）不被静默改动。
 // 这类表没有对照物，少一列/改类型同样只在第一次真实读写时才以 500 的形式暴露。
 var frozenOwnTableDefs = map[string]map[string]string{
 	"community.direct_messages": {
@@ -84,6 +84,53 @@ var frozenOwnTableDefs = map[string]map[string]string{
 		"body":         "body text not null",
 		"created_at":   "created_at timestamptz not null default now()",
 		"read_at":      "read_at timestamptz",
+	},
+	// 举报与申诉（000008）：三张表的列定义逐字冻结。status / reason / target_type / enforcement
+	// 的 CHECK 词表必须与 store/reports.go 里的词表一致（由 reports_schema_test.go 交叉断言）。
+	"community.reports": {
+		"id":                 "id uuid primary key",
+		"target_type":        "target_type text not null check(target_type in ('entity','comment','post','user','resource'))",
+		"target_id":          "target_id text not null",
+		"target_author_id":   "target_author_id uuid",
+		"target_author_name": "target_author_name text not null default ''",
+		"target_context":     "target_context jsonb not null default '{}'::jsonb",
+		"reason":             "reason text not null check(reason in ('spam','abuse','harassment','illegal','copyright','privacy','misinformation','other'))",
+		"detail":             "detail text not null default ''",
+		"evidence_url":       "evidence_url text not null default ''",
+		"reporter_id":        "reporter_id uuid not null",
+		"reporter_name":      "reporter_name text not null default ''",
+		"status":             "status text not null default 'pending' check(status in ('pending','accepted','rejected','resolved'))",
+		"reviewer_id":        "reviewer_id uuid",
+		"reviewer_name":      "reviewer_name text not null default ''",
+		"review_note":        "review_note text not null default ''",
+		"enforcement":        "enforcement text not null default '' check(enforcement in ('','content_removed','user_banned','none'))",
+		"reviewed_at":        "reviewed_at timestamptz",
+		"created_at":         "created_at timestamptz not null default now()",
+		"updated_at":         "updated_at timestamptz not null default now()",
+	},
+	"community.report_events": {
+		"id":         "id bigserial primary key",
+		"report_id":  "report_id uuid not null references SCHEMA.reports(id) on delete cascade",
+		"at":         "at timestamptz not null default now()",
+		"kind":       "kind text not null",
+		"actor_id":   "actor_id uuid",
+		"actor_name": "actor_name text not null default ''",
+		"actor_role": "actor_role text not null default ''",
+		"note":       "note text not null default ''",
+		"meta":       "meta jsonb not null default '{}'::jsonb",
+	},
+	"community.report_appeals": {
+		"id":             "id uuid primary key",
+		"report_id":      "report_id uuid not null references SCHEMA.reports(id) on delete cascade",
+		"appellant_id":   "appellant_id uuid not null",
+		"appellant_name": "appellant_name text not null default ''",
+		"body":           "body text not null",
+		"status":         "status text not null default 'pending' check(status in ('pending','accepted','rejected'))",
+		"reviewer_id":    "reviewer_id uuid",
+		"reviewer_name":  "reviewer_name text not null default ''",
+		"review_note":    "review_note text not null default ''",
+		"reviewed_at":    "reviewed_at timestamptz",
+		"created_at":     "created_at timestamptz not null default now()",
 	},
 }
 
@@ -101,6 +148,11 @@ var frozenOwnIndexes = map[string]string{
 	"direct_messages_conversation": "community.direct_messages (least(sender_id,recipient_id), greatest(sender_id,recipient_id), created_at desc, id desc)",
 	"direct_messages_inbox":        "community.direct_messages (recipient_id, sender_id, created_at desc, id desc)",
 	"direct_messages_outbox":       "community.direct_messages (sender_id, recipient_id, created_at desc, id desc)",
+	"reports_queue":                "community.reports (status, created_at desc, id desc)",
+	"reports_target":               "community.reports (target_type, target_id)",
+	"reports_reporter":             "community.reports (reporter_id, created_at desc)",
+	"report_events_report":         "community.report_events (report_id, at, id)",
+	"report_appeals_queue":         "community.report_appeals (status, created_at desc, id desc)",
 }
 
 var (
