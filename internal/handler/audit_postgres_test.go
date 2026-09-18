@@ -222,7 +222,7 @@ func templateMatches(template, path string) bool {
 	return true
 }
 
-// TestAuditLogAgainstPostgres：逐个走完本服务的 10 条写路由，每条断言"恰好一行 + 正确的
+// TestAuditLogAgainstPostgres：逐个走完本服务的 11 条写路由，每条断言"恰好一行 + 正确的
 // 动作码 / 被动对象 / 变更摘要"，最后对全部行做一次整行敏感值扫描。
 func TestAuditLogAgainstPostgres(t *testing.T) {
 	h := newAuditHarness(t)
@@ -323,6 +323,16 @@ func TestAuditLogAgainstPostgres(t *testing.T) {
 	}
 	if strings.Contains(row.text(), msgBody) || strings.Contains(row.text(), "mf_pat_") {
 		t.Fatalf("私信正文进了审计行：%s", row.Changes)
+	}
+
+	// 6b) 标记已读：被动对象是会话另一端，changes 只记条数（0 也是事实——上面那条是**发出去**的，
+	//     操作者在与 peer 的会话里没有"收到的未读"，所以这里是 0，不是"没生效"）。
+	row = h.auditCall(t, http.MethodPut, "/api/messages/with/"+h.peerID+"/read", "", "rid-audit-message-read", "message.read", 200)
+	if row.TargetType != "user" || row.TargetID != h.peerID {
+		t.Fatalf("标记已读的被动对象不符：%+v", row)
+	}
+	if !strings.Contains(row.Changes, `"marked": 0`) {
+		t.Fatalf("标记已读的 changes 不符（应只记条数）：%s", row.Changes)
 	}
 
 	// 7) 板块配置：只记确实变了的字段，且带变更前后值。

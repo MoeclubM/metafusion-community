@@ -25,6 +25,10 @@ import (
 //	DELETE /api/community/posts/:id                  comment.deleted   删短评（仅评论板块）
 //	POST   /api/favorites/toggle                     favorite.toggled  收藏切换
 //	POST   /api/messages/with/:id                    message.sent      发私信
+//	PUT    /api/messages/with/:id/read                message.read      标记会话已读
+//
+// 收件箱的两条读接口（GET /api/messages/conversations、GET /api/messages/unread）是**纯读**：
+// 不置位 read_at（已读由收信人显式标记，走上面那条 PUT），因此按契约 §7「审计只记写操作」不进注册表。
 //
 // 两条"看起来像漏登记"的事实，都不是漏：
 //   - DELETE /api/community/topics/:id **不排除评论板块**（存量评论行就存在 community.topics 里），
@@ -34,8 +38,9 @@ import (
 //     "审计只记写操作、GET 不记"，因此它不进这份按 HTTP 方法判定的清单。
 //
 // **不存在的写能力**（任务书点名要核的几项）：板块只有"改已有板块"一个写入口，没有创建/删除
-// （板块由种子播种，见 README「板块」）；封禁不在本服务（归账号服务），本服务没有任何 ban 端点；
-// 私信的 read_at 列已预留，但两个端点都不读不写，因此没有"已读"动作码。
+// （板块由种子播种，见 README「板块」）；封禁不在本服务（归账号服务），本服务没有任何 ban 端点。
+// 私信的"已读回执"**已经落地**（read_at 由 PUT /api/messages/with/:id/read 置位），
+// 因此有 message.read 这个动作码；拉黑 / 举报仍不存在（留给 F3），所以也没有对应的码。
 //
 // **凭据被拒的写请求也留痕**：审计中间件挂在身份中间件之前（见 register.go 的 Register）。
 // 被拒的 PAT（401 invalid_token / 503 auth_unavailable）会由身份中间件 abort，这类行记
@@ -57,6 +62,7 @@ var auditActions = map[string]string{
 	"DELETE /api/community/posts/:id":                "comment.deleted",
 	"POST /api/favorites/toggle":                     "favorite.toggled",
 	"POST /api/messages/with/:id":                    "message.sent",
+	"PUT /api/messages/with/:id/read":                "message.read",
 }
 
 // auditExempt 是写路由的豁免表（路由模板 → 一句理由）。当前**为空**：本服务的 10 条写路由全部

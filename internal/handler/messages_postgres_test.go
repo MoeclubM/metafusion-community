@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -238,4 +239,307 @@ func countDirectMessages(t *testing.T, db *sql.DB, id string) int {
 		t.Fatalf("数私信行数: %v", err)
 	}
 	return n
+}
+
+// 收件箱的真库语义：会话列表（按对方分组 + 每段会话的未读）→ 标记已读归零 →
+// 越权（第三者既看不见别人的会话、也不能替别人标记已读）→ 分页 → 索引与查询形状 → 发信限流。
+//
+// 与上一条用例共用夹具与清理口径：身份全是新建 uuid，跑完按参与者删行，不给同库的其它用例留噪音。
+func TestMessageInboxAgainstPostgres(t *testing.T) {
+	ctx, db, router, key, kid := opsFixture(t)
+	alice, bob, carol := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	dave, erin := uuid.NewString(), uuid.NewString()
+	cleanup := func() { cleanupDirectMessages(ctx, db, alice, bob, carol, dave, erin) }
+	cleanup()
+	t.Cleanup(cleanup)
+	token := func(id string) string {
+		return signTokenWith(t, key, kid, id, "user", []string{"member"}, []string{auth.PermissionPostCreate})
+	}
+	send := func(from, to, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		return opsCall(t, router, http.MethodPost, "/api/messages/with/"+to, `{"body":"`+body+`"}`, token(from))
+	}
+
+	// 1) 三条新端点都在登录门槛之后：匿名 401 authentication_required（与既有两条同一口径）。
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/api/messages/conversations"},
+		{http.MethodGet, "/api/messages/unread"},
+		{http.MethodPut, "/api/messages/with/" + bob + "/read"},
+	} {
+		w := opsCall(t, router, tc.method, tc.path, "", "")
+		if w.Code != 401 || opsErrorCode(t, w) != "authentication_required" {
+			t.Fatalf("%s %s 匿名应 401 authentication_required，实际 %d（%s）", tc.method, tc.path, w.Code, w.Body.String())
+		}
+	}
+
+	// 2) 非法 uuid：404 not_found（与读/写同一口径，不把 pq 的解析错误兜成 500）。
+	if w := opsCall(t, router, http.MethodPut, "/api/messages/with/not-a-uuid/read", "", token(alice)); w.Code != 404 || opsErrorCode(t, w) != "not_found" {
+		t.Fatalf("非法 id 标记已读应 404 not_found，实际 %d（%s）", w.Code, w.Body.String())
+	}
+
+	// 3) 空收件箱：items 必须是 [] 而不是 null（前端按数组解析），total / 未读都是 0——
+	//    "没有会话"与"取不到"在服务端是两件事，这一条只钉前者。
+	items, total := listConversations(t, router, token(carol), "")
+	if total != 0 || len(items) != 0 {
+		t.Fatalf("空收件箱应为 0 会话，实际 total=%d items=%d", total, len(items))
+	}
+	if n := unreadCount(t, router, token(carol)); n != 0 {
+		t.Fatalf("没有消息时未读数 = %d，期望 0", n)
+	}
+
+	// 4) A 给 B 发 2 条 → B 的收件箱：1 个会话 / 未读 2 / 最近一条是第二条。
+	for _, body := range []string{"第一条", "第二条"} {
+		if w := send(alice, bob, body); w.Code != 200 {
+			t.Fatalf("发信 %q HTTP %d：%s", body, w.Code, w.Body.String())
+		}
+	}
+	items, total = listConversations(t, router, token(bob), "")
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("B 的收件箱应 1 个会话，实际 total=%d items=%d（%v）", total, len(items), items)
+	}
+	if items[0]["peer_id"] != alice {
+		t.Fatalf("会话的对方 = %v，期望 %v", items[0]["peer_id"], alice)
+	}
+	if last, _ := items[0]["last_message"].(map[string]any); last == nil || last["body"] != "第二条" {
+		t.Fatalf("会话的最近一条应是后发的那条，实际 %v", items[0]["last_message"])
+	}
+	if items[0]["unread_count"] != float64(2) {
+		t.Fatalf("B 的未读数 = %v，期望 2", items[0]["unread_count"])
+	}
+	if n := unreadCount(t, router, token(bob)); n != 2 {
+		t.Fatalf("未读总数 = %d，期望 2（与列表里的 unread_count 必须同口径）", n)
+	}
+	// 同一条会话在**发送方**视角也只剩一段，但未读为 0：自己发的不是自己没读的。
+	sent, sentTotal := listConversations(t, router, token(alice), "")
+	if sentTotal != 1 || len(sent) != 1 || sent[0]["peer_id"] != bob {
+		t.Fatalf("A 的收件箱应含与 B 的一段会话，实际 total=%d items=%v", sentTotal, sent)
+	}
+	if sent[0]["unread_count"] != float64(0) {
+		t.Fatalf("自己发出的消息不该算未读，实际 unread_count=%v", sent[0]["unread_count"])
+	}
+
+	// 5) 越权写入：**发送方**标记已读影响 0 行（read_at 是收信人的状态），B 的未读不变；
+	//    第三者拿 A 的 id 标记同样 0 行，且这一对的行一条都没被置位。
+	if marked := markRead(t, router, token(alice), bob); marked != 0 {
+		t.Fatalf("发送方标记已读应影响 0 行，实际 %d", marked)
+	}
+	if marked := markRead(t, router, token(carol), alice); marked != 0 {
+		t.Fatalf("第三者标记已读应影响 0 行，实际 %d", marked)
+	}
+	if n := unreadCount(t, router, token(bob)); n != 2 {
+		t.Fatalf("越权标记改动了 B 的未读：%d，期望仍是 2", n)
+	}
+	if n := readFlaggedRows(t, db, alice, bob, carol); n != 0 {
+		t.Fatalf("越权调用把 %d 行置成了已读，期望 0", n)
+	}
+	// 第三者读不到别人的会话（结构保证）：这一条已由 TestDirectMessagesAgainstPostgres 覆盖单会话，
+	// 这里补收件箱视角——对方的会话不会出现在第三者的列表里。
+	if items, total := listConversations(t, router, token(carol), ""); total != 0 || len(items) != 0 {
+		t.Fatalf("第三者的收件箱不该有别人的会话，实际 total=%d items=%v", total, items)
+	}
+
+	// 6) 收信人标记已读：影响 2 行 → 未读归零；重复调用影响 0 行且**不刷新回执时间**。
+	if marked := markRead(t, router, token(bob), alice); marked != 2 {
+		t.Fatalf("标记已读应影响 2 行，实际 %d", marked)
+	}
+	if n := unreadCount(t, router, token(bob)); n != 0 {
+		t.Fatalf("标记已读后未读数 = %d，期望 0", n)
+	}
+	items, _ = listConversations(t, router, token(bob), "")
+	if items[0]["unread_count"] != float64(0) {
+		t.Fatalf("标记已读后列表里的 unread_count = %v，期望 0", items[0]["unread_count"])
+	}
+	first := readReceiptAt(t, db, bob, alice)
+	if first == "" {
+		t.Fatal("标记已读没有写 read_at：回执列没有接上线")
+	}
+	if marked := markRead(t, router, token(bob), alice); marked != 0 {
+		t.Fatalf("重复标记已读应影响 0 行（幂等），实际 %d", marked)
+	}
+	if again := readReceiptAt(t, db, bob, alice); again != first {
+		t.Fatalf("重复标记刷新了回执时间：%s → %s（应停在第一次读到的那一刻）", first, again)
+	}
+
+	// 7) 收件箱分页：25 个不同对方各给 dave 发一条（时间显式错开，同一事务里 now() 会撞在一起）。
+	//    这里直接插库而不是走接口：25 个对方是 25 个身份，用 HTTP 造要先签 25 个令牌，与分页无关。
+	for i := 0; i < 25; i++ {
+		exec(t, ctx, db, `INSERT INTO community.direct_messages(id,sender_id,recipient_id,body,created_at)
+			VALUES($1,$2,$3,$4,now() - make_interval(secs => $5))`,
+			uuid.NewString(), uuid.NewString(), dave, fmt.Sprintf("会话-%02d", i), i)
+	}
+	page1, total1 := listConversations(t, router, token(dave), "page=1&page_size=20")
+	if total1 != 25 || len(page1) != 20 {
+		t.Fatalf("第 1 页应 20 个会话 / total=25，实际 %d 个 / total=%d", len(page1), total1)
+	}
+	if bodyOf(t, page1[0]) != "会话-00" || bodyOf(t, page1[19]) != "会话-19" {
+		t.Fatalf("会话应按最近一条的时间倒序：首 %q 末 %q", bodyOf(t, page1[0]), bodyOf(t, page1[19]))
+	}
+	page2, total2 := listConversations(t, router, token(dave), "page=2&page_size=20")
+	if total2 != 25 || len(page2) != 5 {
+		t.Fatalf("第 2 页应 5 个会话 / total=25，实际 %d 个 / total=%d", len(page2), total2)
+	}
+	if bodyOf(t, page2[0]) != "会话-20" || bodyOf(t, page2[4]) != "会话-24" {
+		t.Fatalf("第 2 页应是更旧的 5 段：首 %q 末 %q", bodyOf(t, page2[0]), bodyOf(t, page2[4]))
+	}
+	// 空页也要给出正确的 total：前端靠它决定"还有没有下一页"，折成 0 会把入口掐掉。
+	if page3, total3 := listConversations(t, router, token(dave), "page=3&page_size=20"); total3 != 25 || len(page3) != 0 {
+		t.Fatalf("第 3 页应为空且 total 仍为 25，实际 %d 个 / total=%d", len(page3), total3)
+	}
+	if sized, _ := listConversations(t, router, token(dave), "page=1&page_size=0"); len(sized) != 20 {
+		t.Fatalf("page_size 越界应取缺省 20，实际 %d 个", len(sized))
+	}
+
+	// 8) 索引真的能被这两条查询用上（不是"建了索引但查询对不上"）：
+	//    关掉 seqscan 之后，两个分支必须各自命中收件箱/发件箱索引，且都不需要额外排序。
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开启事务: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+		t.Fatalf("关掉 seqscan: %v", err)
+	}
+	assertPlanUsesIndex(t, tx, "direct_messages_inbox", dave, `SELECT id FROM community.direct_messages
+		WHERE recipient_id = $1::uuid ORDER BY sender_id, created_at DESC, id DESC`)
+	assertPlanUsesIndex(t, tx, "direct_messages_outbox", dave, `SELECT id FROM community.direct_messages
+		WHERE sender_id = $1::uuid ORDER BY recipient_id, created_at DESC, id DESC`)
+
+	// 9) 发信限流：同一账号连发 messageSendBurst 条之后，第 burst+1 条 429 rate_limited
+	//    （带 Retry-After），且**不落库**；这一行失败也照样留痕（error_code 与响应体一致）。
+	for i := 0; i < messageSendBurst; i++ {
+		if w := send(erin, bob, fmt.Sprintf("限流-%d", i)); w.Code != 200 {
+			t.Fatalf("限流前第 %d 条应放行，实际 HTTP %d：%s", i+1, w.Code, w.Body.String())
+		}
+	}
+	limited := send(erin, bob, "限流-超限")
+	if limited.Code != http.StatusTooManyRequests || opsErrorCode(t, limited) != "rate_limited" {
+		t.Fatalf("超限应 429 rate_limited，实际 %d（%s）", limited.Code, limited.Body.String())
+	}
+	if retryAfter := limited.Header().Get("Retry-After"); retryAfter == "" {
+		t.Fatal("429 必须带 Retry-After，否则调用方只能猜")
+	}
+	if n := countDirectMessages(t, db, erin); n != messageSendBurst {
+		t.Fatalf("被限流的请求落库了：erin 参与 %d 行，期望 %d", n, messageSendBurst)
+	}
+	if rid := limited.Header().Get("X-Request-Id"); rid != "" {
+		row := waitAuditRows(t, ctx, db, rid, 1)[0]
+		if row.Action != "message.sent" || row.Result != "failure" || row.ErrorCode != "rate_limited" {
+			t.Fatalf("被限流的发信审计行不符：%+v", row)
+		}
+		_, _ = db.ExecContext(ctx, "DELETE FROM audit.audit_log WHERE request_id=$1", rid)
+	}
+}
+
+// listConversations 打收件箱端点并解出 items/total：形状不符直接失败（前端按这两个键解析）。
+// 空列表必须是 [] 而不是 null——折成 null 的话前端会把它当"取不到"。
+func listConversations(t *testing.T, router http.Handler, bearer, query string) ([]map[string]any, int) {
+	t.Helper()
+	path := "/api/messages/conversations"
+	if query != "" {
+		path += "?" + query
+	}
+	w := opsCall(t, router, http.MethodGet, path, "", bearer)
+	if w.Code != 200 {
+		t.Fatalf("GET 收件箱 HTTP %d：%s", w.Code, w.Body.String())
+	}
+	payload := struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}{}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("解析收件箱响应: %v（%s）", err, w.Body.String())
+	}
+	if payload.Items == nil {
+		t.Fatalf("items 必须是数组（空收件箱也要是 [] 而不是 null）：%s", w.Body.String())
+	}
+	return payload.Items, payload.Total
+}
+
+// unreadCount 打未读总数端点（导航栏角标的形状）。
+func unreadCount(t *testing.T, router http.Handler, bearer string) int {
+	t.Helper()
+	w := opsCall(t, router, http.MethodGet, "/api/messages/unread", "", bearer)
+	if w.Code != 200 {
+		t.Fatalf("GET 未读 HTTP %d：%s", w.Code, w.Body.String())
+	}
+	payload := struct {
+		UnreadCount *int `json:"unread_count"`
+	}{}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil || payload.UnreadCount == nil {
+		t.Fatalf("未读响应应为 {\"unread_count\":N}：%s", w.Body.String())
+	}
+	return *payload.UnreadCount
+}
+
+// markRead 标记会话已读并返回影响条数。
+func markRead(t *testing.T, router http.Handler, bearer, peer string) int {
+	t.Helper()
+	w := opsCall(t, router, http.MethodPut, "/api/messages/with/"+peer+"/read", "", bearer)
+	if w.Code != 200 {
+		t.Fatalf("标记已读 HTTP %d：%s", w.Code, w.Body.String())
+	}
+	payload := struct {
+		Marked *int64 `json:"marked"`
+	}{}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil || payload.Marked == nil {
+		t.Fatalf("标记已读响应应为 {\"marked\":N}：%s", w.Body.String())
+	}
+	return int(*payload.Marked)
+}
+
+// bodyOf 取一条会话的最近一条正文。
+func bodyOf(t *testing.T, conv map[string]any) string {
+	t.Helper()
+	last, _ := conv["last_message"].(map[string]any)
+	body, _ := last["body"].(string)
+	return body
+}
+
+// readFlaggedRows 数这几个身份之间已经被置为已读的行（用来断言越权调用没有改到任何一行）。
+func readFlaggedRows(t *testing.T, db *sql.DB, ids ...string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM community.direct_messages
+		WHERE read_at IS NOT NULL
+		  AND (sender_id = ANY($1::uuid[]) OR recipient_id = ANY($1::uuid[]))`, pq.Array(ids)).Scan(&n); err != nil {
+		t.Fatalf("数已读行: %v", err)
+	}
+	return n
+}
+
+// readReceiptAt 取"peer 发给 user 的"已读时间戳（最新那一个），空串表示一条都没读过。
+func readReceiptAt(t *testing.T, db *sql.DB, user, peer string) string {
+	t.Helper()
+	var at sql.NullString
+	if err := db.QueryRow(`SELECT max(read_at)::text FROM community.direct_messages
+		WHERE recipient_id=$1::uuid AND sender_id=$2::uuid`, user, peer).Scan(&at); err != nil {
+		t.Fatalf("读回执时间: %v", err)
+	}
+	return at.String
+}
+
+// assertPlanUsesIndex 关掉 seqscan 后跑一次 EXPLAIN，断言规划器选的确实是这条索引，
+// 且没有落到额外排序上（索引列顺序或方向写错都会在这里失败——表太小，别的用例看不出来）。
+func assertPlanUsesIndex(t *testing.T, tx *sql.Tx, index, userID, query string) {
+	t.Helper()
+	rows, err := tx.Query("EXPLAIN "+query, userID)
+	if err != nil {
+		t.Fatalf("EXPLAIN %.60s…: %v", query, err)
+	}
+	defer rows.Close()
+	plan := []string{}
+	for rows.Next() {
+		var line string
+		if err = rows.Scan(&line); err != nil {
+			t.Fatalf("读执行计划: %v", err)
+		}
+		plan = append(plan, line)
+	}
+	joined := strings.Join(plan, "\n")
+	if !strings.Contains(joined, index) {
+		t.Fatalf("这条查询没有走 %s：索引列顺序与查询的 WHERE/ORDER BY 对不上了\n%s", index, joined)
+	}
+	if strings.Contains(joined, "Seq Scan") {
+		t.Fatalf("关掉 seqscan 后仍在全表扫：\n%s", joined)
+	}
 }

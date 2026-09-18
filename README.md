@@ -47,7 +47,10 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 | GET | `/api/users/{id}/favorites` | 匿名 | 指定用户的收藏列表（公开读，目标按可见性过滤） |
 | GET | `/api/users/{id}/stats` | 匿名 | 用户互动统计（主题 / 楼中回复 / 收藏），`{"stats":{…}}`；口径见「用户互动统计」 |
 | GET | `/api/messages/with/{id}` | 登录 | 与某人的私信会话（`page`/`page_size`，缺省 20、上限 100，按时间**倒序**）；`{"items":[{id,sender_id,recipient_id,body,created_at}],"total":N}` |
-| POST | `/api/messages/with/{id}` | 登录 | 发私信（`{"body":"…"}`；裁剪两侧空白后必须非空、不超过 4000 **字符**，否则 400 `invalid_body`；给自己发 400 `invalid_recipient`）→ `{"message":{…}}` |
+| POST | `/api/messages/with/{id}` | 登录 | 发私信（`{"body":"…"}`；裁剪两侧空白后必须非空、不超过 4000 **字符**，否则 400 `invalid_body`；给自己发 400 `invalid_recipient`；超过发送频率 429 `rate_limited`）→ `{"message":{…}}` |
+| GET | `/api/messages/conversations` | 登录 | 收件箱会话列表（按对方分组，`page`/`page_size` 与其它列表同口径，按最近一条**倒序**）；`{"items":[{peer_id,last_message,unread_count}],"total":N}`；口径见「私信（DM）」 |
+| GET | `/api/messages/unread` | 登录 | 我的未读总数（导航栏角标）；`{"unread_count":N}`，与收件箱每行的 `unread_count` 同口径 |
+| PUT | `/api/messages/with/{id}/read` | 登录 | 标记"对方发给我"的未读为已读 → `{"marked":N}`（幂等：重复调用为 0，且不刷新回执时间） |
 
 论坛主题与"实体短评"共用同一张 `community.topics`，靠板块区分语义：评论锚定实体、无独立标题、不进信息流；
 主题有标题、可独立成文、进信息流（`show_in_feed`）。
@@ -98,7 +101,9 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 ### 私信（DM）
 
-前端 `DirectMessageModal` 调的就是上面两条 `/api/messages/with/{id}`；此前四仓都没有实现，两个端点必然 404。
+前端 `DirectMessageModal`（用户主页弹窗）与主站 `/messages` 收件箱页读的是同一批端点：
+单会话 `/api/messages/with/{id}`、收件箱 `/api/messages/conversations`、未读 `/api/messages/unread`、
+标记已读 `PUT /api/messages/with/{id}/read`。
 
 - **可见性是查询结构保证的**：会话由 `(当前用户, 对方)` 一对参与者决定，SQL 用
   `LEAST/GREATEST` 归一后等值匹配（与 `direct_messages_conversation` 索引表达式逐字一致），
@@ -107,9 +112,27 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
   代价是收件人被删除后这些私信仍在。
 - **不能给自己发**：写接口 400 `invalid_recipient`，`CHECK(sender_id <> recipient_id)` 是同一口径的兜底；
   读自己的会话不报错，恒为空会话。
-- **`read_at` 已预留、尚未启用**：两个端点都不读不写它，落地已读回执时由收信人读会话时置位。
-- **分页窗口**：第一页是**最近**的 20 条（按 `created_at DESC, id DESC`），往后翻是更早的；
-  `total` 是整段会话的条数，不随窗口变化。
+- **已读回执是收信人的动作、不是读接口的副作用**：`read_at`（000005 预留的列）由
+  `PUT /api/messages/with/{id}/read` 置位，`GET` 会话**不**顺手写它——读接口带写副作用会让缓存、
+  重试与审计都说不清（一个 GET 既读又写还回写 `X-Request-Id`），而这个动作有它自己的动作码 `message.read`。
+  幂等：`UPDATE … WHERE read_at IS NULL`，重复调用第二次影响 0 行、也不刷新回执时间。
+  发送方**看不到**回执（对外形状里没有"对方读没读"），本批次只在收件箱侧以 `unread_count` 表达。
+- **会话列表不含对方用户名**：账号资料归账号服务，本服务不查它的库；让每行都做出站调用去补用户名，
+  等于把收件箱变成"账号服务可用才可用"，而且是 N 次出站。列表只给 `peer_id`，调用方按自己的
+  缓存/并发策略去 `GET /api/users/{id}` 取（主站收件箱页按页有界并发取一次并缓存）。
+- **未读数只有一套口径**：`recipient_id = 我 AND read_at IS NULL`（000009 的索引服务它），
+  收件箱每行的 `unread_count` 与 `GET /api/messages/unread` 都是它；自己发出的消息从不计入。
+- **分页窗口**：单会话第一页是**最近**的 20 条（按 `created_at DESC, id DESC`），往后翻是更早的，
+  `total` 是整段会话的条数、不随窗口变化；收件箱同样倒序（按最近一条），`total` 是"我参与了多少段会话"，
+  **页码越界时该页为空但 `total` 仍正确**（前端靠它判断还有没有下一页）。
+- **收件箱列表是两条查询，不是 N+1**：000009 的两条索引分别服务"我收到的按对方取最近一条"与
+  "我发出的按对方取最近一条"，两个分支都是索引倒序扫描（`DISTINCT ON` 的排序键与索引列顺序逐字对齐），
+  未读由一次 `GROUP BY sender_id` 出全部会话；真库用例在 `enable_seqscan=off` 下断言命中的正是这两条索引。
+- **反骚扰只做到"发送频率"这一层**：网关按 IP 限流（30r/s）拦不住"一个账号刷量"，因此发信另有一条
+  **按账号**的令牌桶（容量 20、每分钟回满，见 `internal/handler/message_limit.go`），超限回 429 `rate_limited`
+  + `Retry-After`。已知边界：桶在进程内存里（多副本时额度按副本数放大，要跨副本一致得上共享存储）；
+  只限"发多快"、不限"发给谁"。**拉黑 / 举报 / 静默期仍不存在**（留给 F3）——本服务目前没有任何
+  收件人侧设置，也没有可以阻断投递的名单。
 
 ### 帖子治理列表
 
@@ -171,7 +194,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 ## 审计留痕（写入侧）
 
-本服务的**全部 10 条写路由**都会往跨服务共用的 `audit.audit_log` 写一行审计（谁、什么时候、
+本服务的**全部 11 条写路由**都会往跨服务共用的 `audit.audit_log` 写一行审计（谁、什么时候、
 对什么、做了什么、结果如何）。契约是主仓库 [docs/architecture/audit-log.md](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/audit-log.md)：
 表结构、动作码命名、写入语义、脱敏规则四个服务共用（各仓各存一份同源代码，没有共享 module）。
 
@@ -187,6 +210,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 | DELETE | `/api/community/posts/{id}` | `comment.deleted` | `comment` |
 | POST | `/api/favorites/toggle` | `favorite.toggled` | `entity` = 被收藏的实体 |
 | POST | `/api/messages/with/{id}` | `message.sent` | `user` = 收件人 |
+| PUT | `/api/messages/with/{id}/read` | `message.read` | `user` = 会话另一端 |
 
 三条不变式（实现 `internal/audit`，注册表与接线 `internal/handler/audit.go`）：
 
@@ -202,8 +226,10 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 四处需要知道的口径：
 
 - **本服务没有的写能力**：板块只有"改已有板块"（新增与删除由种子与后台完成，无端点）；
-  没有封禁端点（封禁归账号服务）；私信的 `read_at` 列已预留但两个端点都不读不写，因此没有
-  "已读"动作码。这些在任务清单里点名核过，都是"端点不存在"，不是漏接线。
+  没有封禁端点（封禁归账号服务）；私信的已读回执**已经有了**（`message.read`），
+  但拉黑 / 举报仍没有（留给 F3）。这些在任务清单里点名核过，都是"端点不存在"，不是漏接线。
+- **收件箱的两条读接口是纯读**（`GET /api/messages/conversations`、`GET /api/messages/unread`）：
+  不置位 `read_at`，因此按契约 §7「审计只记写操作」不进注册表。
 - **GET 不记**：`GET /api/community/topics/{id}` 会自增 `view_count`（读接口的副作用），
   契约 §7 明确"审计只记写操作"，因此它不在注册表里；这条读接口也不回写 `X-Request-Id`。
 - **`credential_type` 是近似值**：本服务只验签与内省，分不清会话令牌与 OAuth 令牌，

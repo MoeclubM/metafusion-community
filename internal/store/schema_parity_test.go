@@ -92,8 +92,15 @@ var frozenOwnTableDefs = map[string]map[string]string{
 // 私信的会话查询全靠 direct_messages_conversation（LEAST/GREATEST 归一参与者 + 时间倒序）：
 // 索引被删、表达式换写法或 DESC 写成 ASC，查询都会退化成全表扫描 + 排序，
 // 而编译、vet 与真库用例（表太小，看不出计划差异）都不会失败。
+// 收件箱的两条索引（000009）：收件箱按"我的那一侧"分组取每段会话的最近一条，
+// 用不上 direct_messages_conversation（它的前两列是两个参与者归一后的对），
+// 因此列顺序是 (我这一侧, 对方, created_at desc, id desc)，未读计数与标记已读共用前两列。
+// 与上面那条同理：列顺序或方向被改动，查询会从"索引倒序扫描"退化成"全表扫 + 排序"，
+// 而编译、vet 与真库用例（表太小，看不出计划差异）都不会失败。
 var frozenOwnIndexes = map[string]string{
 	"direct_messages_conversation": "community.direct_messages (least(sender_id,recipient_id), greatest(sender_id,recipient_id), created_at desc, id desc)",
+	"direct_messages_inbox":        "community.direct_messages (recipient_id, sender_id, created_at desc, id desc)",
+	"direct_messages_outbox":       "community.direct_messages (sender_id, recipient_id, created_at desc, id desc)",
 }
 
 var (

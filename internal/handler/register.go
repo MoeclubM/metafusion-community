@@ -27,10 +27,12 @@ type Handler struct {
 	// audit 是写操作的审计写入器（注册表与接线见 audit.go）。db 为 nil 时它是 nil，
 	// 中间件退化为空操作。
 	audit *audit.Recorder
+	// messages 是发私信的按账号令牌桶（反骚扰的最小约束，口径与已知边界见 message_limit.go）。
+	messages *messageLimiter
 }
 
 func New(s *store.Store, cat *catalog.Client, verifier *auth.Verifier) *Handler {
-	h := &Handler{db: s.DB(), store: s, catalog: cat, verifier: verifier}
+	h := &Handler{db: s.DB(), store: s, catalog: cat, verifier: verifier, messages: newMessageLimiter()}
 	// 写入器就在这里建，而不是要求调用方注入：注册表能拦住"新增写端点忘了登记动作码"，
 	// 但拦不住"忘了把写入器接上"——那会让全部写操作静默不留痕，比漏一条端点严重得多。
 	if h.db != nil {
