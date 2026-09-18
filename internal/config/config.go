@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MoeclubM/metafusion-community/internal/nettrust"
 )
 
 // Config 是互动服务的运行配置，全部来自环境变量。
@@ -27,6 +29,11 @@ type Config struct {
 	CatalogURL string
 	// CatalogTimeout 单次目录调用的超时。
 	CatalogTimeout time.Duration
+	// TrustedProxies 是应用层信任的反向代理范围（TRUSTED_PROXIES，逗号分隔的 IP/CIDR）。
+	// 留空 = 只信回环 + RFC1918 私网（网关容器所在网段），none = 入口链上没有代理。
+	// 解析与生效在启动时由 nettrust.Apply 完成：非法项直接拒绝启动，不退化成"谁都不信"
+	// ——那种退化会让 ClientIP() 恒为网关地址，按 IP 的限流桶与审计 actor_ip 一起失真。
+	TrustedProxies string
 }
 
 func Load() Config {
@@ -40,6 +47,7 @@ func Load() Config {
 		AuthURL:         env("AUTH_URL", ""),
 		CatalogURL:      env("CATALOG_URL", "http://backend:8080"),
 		CatalogTimeout:  time.Duration(envInt("COMMUNITY_CATALOG_TIMEOUT_MS", 5000)) * time.Millisecond,
+		TrustedProxies:  env(nettrust.EnvVar, ""), // TRUSTED_PROXIES：留空即 nettrust 的保守默认
 	}
 	if c.DatabaseURL == "" {
 		c.DatabaseURL = buildDSN()

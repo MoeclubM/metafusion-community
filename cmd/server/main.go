@@ -16,6 +16,7 @@ import (
 	"github.com/MoeclubM/metafusion-community/internal/catalog"
 	"github.com/MoeclubM/metafusion-community/internal/config"
 	"github.com/MoeclubM/metafusion-community/internal/handler"
+	"github.com/MoeclubM/metafusion-community/internal/nettrust"
 	"github.com/MoeclubM/metafusion-community/internal/store"
 )
 
@@ -55,7 +56,14 @@ func main() {
 
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
-	r.SetTrustedProxies(nil)
+	// 真实客户端 IP：只信任显式声明的来源（TRUSTED_PROXIES，默认回环 + RFC1918 私网 =
+	// 网关容器所在网段）。配置非法就拒绝启动——静默退回"谁都不信"会让 ClientIP() 恒等于
+	// 网关地址，审计 actor_ip 与按 IP 的限流桶一起失真，而那种退化在功能上"看起来正常"。
+	trustedProxies, err := nettrust.Apply(r, cfg.TrustedProxies)
+	if err != nil {
+		log.Fatalf("community trusted proxy configuration failed: %v", err)
+	}
+	log.Printf("community trusted proxies in effect: %s", trustedProxies)
 	r.Use(func(c *gin.Context) {
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")

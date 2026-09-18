@@ -7,6 +7,19 @@ import (
 
 // 口令里出现 @ : / ? # 这类字符时，字符串拼接会拼出非法 DSN 或连错主机；
 // 这条用例用"最难缠"的口令固定住转义行为。
+// TRUSTED_PROXIES 必须被真的读到：部署编排与 scripts/check_env_matrix.py 都按这个名字注入/校验，
+// 读错了名字的后果是"配了可信代理、服务仍不采信"，按 IP 的限流桶与审计 actor_ip 一起失真。
+func TestLoadReadsTrustedProxies(t *testing.T) {
+	t.Setenv("TRUSTED_PROXIES", " 10.1.0.0/16 , 203.0.113.7 ")
+	if got := Load().TrustedProxies; got != "10.1.0.0/16 , 203.0.113.7" {
+		t.Fatalf("TrustedProxies = %q", got)
+	}
+	t.Setenv("TRUSTED_PROXIES", "")
+	if got := Load().TrustedProxies; got != "" {
+		t.Fatalf("未配置时 TrustedProxies = %q，期望空串（留空由 nettrust 决定保守默认）", got)
+	}
+}
+
 func TestBuildDSNEscapesCredentials(t *testing.T) {
 	t.Setenv("DB_HOST", "db.internal")
 	t.Setenv("DB_PORT", "6543")
