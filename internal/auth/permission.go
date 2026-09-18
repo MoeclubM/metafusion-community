@@ -50,18 +50,33 @@ var communityPermissionCodes = []string{
 // 现在保持 admin 兜底，边界不变。
 var legacyOpenCodes = []string{PermissionPostCreate}
 
+// HasPermission 是**纯权限码集合判定**：只看 permissions 里的码（* 通配即全权），
+// 不做任何角色或历史边界兜底。PAT 身份（FromPAT）一律走它——PAT 的权限集合可能为空
+// （scopes 里没有本服务的任何码），空集合必须表现为"什么都不许"：若顺着 legacyOpenCodes
+// 兜底，一个 scopes=[] 的 PAT 就能发帖，收窄 scopes 也就形同虚设。
+func (p *Principal) HasPermission(code string) bool {
+	if p == nil {
+		return false
+	}
+	return hasCode(p.Permissions, permissionWildcard) || hasCode(p.Permissions, code)
+}
+
 // Can 报告身份是否持有某权限码；身份为 nil（匿名）一律不放行。
 //
 // 令牌带 permissions 时**一律以码为准**（* 通配即全权）：拆服务后这是唯一的授权来源，
 // 此时角色不再额外放行，否则「角色兜底」会变成绕过权限组的后门。
 // 只有令牌完全没有 permissions 声明时（老令牌，或尚未按权限组配置的实例）才按历史边界兜底：
 // 发帖类码见 legacyOpenCodes（收口前就是"登录即可"），其余码只认 admin —— 与本服务改造前一致。
+//
+// FromPAT（身份来自 PAT 内省）时**永不**回落到兜底：PAT 的权限就是账号服务算好的
+// "用户自身权限 ∩ scopes"，scopes 空时就是空。若把它当"没有 permissions 声明"处理，
+// 一个 scopes=[] 的 PAT 会顺着 legacyOpenCodes 拿到发帖权——收窄 scopes 也就形同虚设。
 func (p *Principal) Can(code string) bool {
 	if p == nil {
 		return false
 	}
-	if len(p.Permissions) > 0 {
-		return hasCode(p.Permissions, permissionWildcard) || hasCode(p.Permissions, code)
+	if len(p.Permissions) > 0 || p.FromPAT {
+		return p.HasPermission(code)
 	}
 	if hasCode(legacyOpenCodes, code) {
 		return true
