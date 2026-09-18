@@ -131,8 +131,38 @@ type forumBoard struct {
 // 避免两处列不同步导致 scanBoardRow 静默串列。
 const boardCols = "code,names,descriptions,name,description,color,icon,sort_order,is_enabled,show_in_feed"
 
-func (h *Handler) listBoards(ctx context.Context) ([]forumBoard, error) {
-	rows, err := h.db.QueryContext(ctx, "SELECT "+boardCols+" FROM community.boards ORDER BY sort_order,code")
+// 板块的两个开关分工不同（语义定稿，README「板块」一节同步一份）：
+//   - is_enabled=false 是"整个板块停用"：公开读路径（板块列表、按板块的主题列表、主题详情，
+//     以及以 board_code 限定的评论/短评读路径）不再出现该板块及其内容；发新主题仍照旧被拒
+//     （POST /community/topics 的 400 invalid_board），权限语义不变。
+//   - show_in_feed 只管"已启用板块的主题要不要进站点信息流"，由前端按它过滤，服务端不解释它。
+//
+// enabledBoardGuard 生成"该行所属板块未停用"的谓词，供上述读路径拼进 WHERE。
+// 写成 NOT EXISTS 而不是 JOIN 板块表：读路径的 FROM 已经限定为 community.topics t，
+// 再加一张表会让这些查询多出一份列清单，反而更容易串列。
+func enabledBoardGuard(alias string) string {
+	return "(NOT EXISTS (SELECT 1 FROM community.boards b WHERE b.code=" + alias + ".board_code AND NOT b.is_enabled))"
+}
+
+// seesDisabledBoards 报告调用者是否不受停用板块的读过滤影响。
+//
+// 这是**刻意的可见性例外**：持 community.board.manage 的运营调用者能看到停用板块及其内容。
+// 社区管理台（admin/src/lib/api/boards.ts）与公开前端读的是同一个 GET /api/community/boards，
+// 若对运营也过滤，管理台就看不到被停用的板块，也就没有把它切回来的入口——停用会变成单向操作。
+// 刻意不用查询参数（如 ?include_disabled=1）表达这一点：任何忘记带参数的运营客户端都会静默
+// "少看到板块"，而"少一块的列表"看起来仍然正常；授权例外只挂在权限码上，至少还能被权限审计发现。
+func (h *Handler) seesDisabledBoards(c *gin.Context) bool {
+	return h.principal(c).Can(auth.PermissionBoardManage)
+}
+
+// listBoards 列出板块。includeDisabled 由调用方按 seesDisabledBoards 决定：
+// 公开读只列已启用板块，运营读（管理台）连停用的也列出来。
+func (h *Handler) listBoards(ctx context.Context, includeDisabled bool) ([]forumBoard, error) {
+	query := "SELECT " + boardCols + " FROM community.boards"
+	if !includeDisabled {
+		query += " WHERE is_enabled"
+	}
+	rows, err := h.db.QueryContext(ctx, query+" ORDER BY sort_order,code")
 	if err != nil {
 		return nil, err
 	}
@@ -268,8 +298,9 @@ func (h *Handler) topicTags(ctx context.Context, ids []string) (map[string][]for
 
 func (h *Handler) registerForum(api *gin.RouterGroup) {
 	// 板块列表：前端 fetchBoards 期望裸数组。
+	// 停用板块对公开读不可见，持 community.board.manage 的运营仍看到全部（判据见 seesDisabledBoards）。
 	api.GET("/community/boards", h.guard(false), func(c *gin.Context) {
-		boards, err := h.listBoards(c.Request.Context())
+		boards, err := h.listBoards(c.Request.Context(), h.seesDisabledBoards(c))
 		if err != nil {
 			fail(c, 500, "module_error")
 			return
@@ -289,6 +320,11 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 		} else {
 			args = append(args, commentBoard)
 			where = append(where, fmt.Sprintf("t.board_code<>$%d", len(args)))
+		}
+		// 停用板块的内容不再公开。显式 board_code=<停用板块> 不改成 404：调用方给的是合法筛选，
+		// 事实就是"没有内容"，响应形状（{"items":[],"total":0}）必须保持不变，否则前端要为它单开分支。
+		if !h.seesDisabledBoards(c) {
+			where = append(where, enabledBoardGuard("t"))
 		}
 		if q := strings.TrimSpace(c.Query("q")); q != "" {
 			args = append(args, "%"+q+"%")
@@ -391,8 +427,15 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 		}
 		// 浏览量自增与读取合并：一次 UPDATE ... RETURNING 完成。
 		// 排除评论板块：评论不是"文章"，不应有主题详情页（应回到其锚定的条目）。
+		// 停用板块的主题对公开读按"不存在"处理（404 与不存在同口径）；谓词写在 UPDATE 的 WHERE 里，
+		// 因此这类请求也不会顺手把 view_count 加一（不可见的内容不该产生浏览计数）。
+		where := " WHERE t.id=$1 AND t.board_code<>$2"
+		args := []any{id, commentBoard}
+		if !h.seesDisabledBoards(c) {
+			where += " AND " + enabledBoardGuard("t")
+		}
 		rows, err := h.db.QueryContext(c.Request.Context(),
-			"UPDATE community.topics t SET view_count=view_count+1 WHERE t.id=$1 AND t.board_code<>$2 RETURNING "+topicCols, id, commentBoard)
+			"UPDATE community.topics t SET view_count=view_count+1"+where+" RETURNING "+topicCols, args...)
 		if err != nil {
 			fail(c, 500, "module_error")
 			return

@@ -23,6 +23,11 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 		limit, _ := pagingLimitOffset(c, 50)
 		args := []any{commentBoard}
 		where := []string{"t.board_code = $1"}
+		// 评论板块被停用时，评论流同样不再公开（持 community.board.manage 的运营仍可见，
+		// 判据与板块列表共用，见 forum.go 的 seesDisabledBoards）。
+		if !h.seesDisabledBoards(c) {
+			where = append(where, enabledBoardGuard("t"))
+		}
 		// entity_id 必须是合法 UUID，否则直接判为空结果，而不是把非法字面量送进查询。
 		if raw := strings.TrimSpace(c.Query("entity_id")); raw != "" {
 			if _, err := uuid.Parse(raw); err != nil {
@@ -114,7 +119,12 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 		if !h.entity(c, id) {
 			return
 		}
-		rows, err := h.db.QueryContext(c.Request.Context(), `SELECT id::text,author_id::text,COALESCE(NULLIF(author_name, ''), 'Anonymous'),body,created_at FROM community.topics WHERE board_code=$1 AND entity_id=$2 ORDER BY created_at DESC LIMIT 100`, commentBoard, id)
+		// 评论板块停用时，条目下的短评同样不再公开（谓词与其余读路径同一份，见 enabledBoardGuard）。
+		query := `SELECT id::text,author_id::text,COALESCE(NULLIF(author_name, ''), 'Anonymous'),body,created_at FROM community.topics t WHERE t.board_code=$1 AND t.entity_id=$2`
+		if !h.seesDisabledBoards(c) {
+			query += " AND " + enabledBoardGuard("t")
+		}
+		rows, err := h.db.QueryContext(c.Request.Context(), query+" ORDER BY created_at DESC LIMIT 100", commentBoard, id)
 		if err != nil {
 			fail(c, 500, "module_error")
 			return
@@ -202,11 +212,15 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 		}
 		var postID, entityID, author, authorName, body string
 		var at time.Time
+		// 评论板块停用时直达链接按"不存在"处理（404 与其它读路径同一口径）。
+		where := "WHERE t.id = $1 AND t.board_code = $2"
+		if !h.seesDisabledBoards(c) {
+			where += " AND " + enabledBoardGuard("t")
+		}
 		err := h.db.QueryRowContext(c.Request.Context(), `
 			SELECT t.id::text, COALESCE(t.entity_id::text,''), t.author_id::text,
 			       COALESCE(NULLIF(t.author_name, ''), 'Anonymous'), t.body, t.created_at
-			FROM community.topics t
-			WHERE t.id = $1 AND t.board_code = $2`, id, commentBoard).
+			FROM community.topics t `+where, id, commentBoard).
 			Scan(&postID, &entityID, &author, &authorName, &body, &at)
 		if err == sql.ErrNoRows {
 			fail(c, 404, "not_found")

@@ -24,19 +24,19 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/community/boards` | 匿名 | 板块列表 |
-| GET | `/api/community/topics` | 匿名 | 主题列表：板块/标签/关键词筛选、置顶优先、分页 |
+| GET | `/api/community/boards` | 匿名 | 板块列表（只含 `is_enabled=true`；持 `community.board.manage` 时含停用板块，见「板块」） |
+| GET | `/api/community/topics` | 匿名 | 主题列表：板块/标签/关键词筛选、置顶优先、分页；停用板块的主题不在其中 |
 | GET | `/api/community/topic-tags` | 匿名 | 标签清单（`[{id,name}]`，供前端按 id 筛选） |
-| GET | `/api/community/topics/{id}` | 匿名 | 主题详情（含回复、标签、锚定实体题名）；浏览量自增 |
+| GET | `/api/community/topics/{id}` | 匿名 | 主题详情（含回复、标签、锚定实体题名）；浏览量自增；停用板块的主题按不存在处理（404 `not_found`，且不自增） |
 | POST | `/api/community/topics` | `community.post.create` | 发主题（可锚定实体、可带标签） |
 | POST | `/api/community/topics/{id}/posts` | `community.post.create` | 回帖（`post_number` 楼层、可引用楼号） |
 | DELETE | `/api/community/topics/{id}` | 作者 / `community.post.moderate` | 删主题（级联回复） |
 | DELETE | `/api/community/topics/{id}/posts/{postId}` | 作者 / `community.post.moderate` | 删回复 |
 | GET | `/api/community/posts` | `community.post.moderate` | 帖子治理列表：跨主题列楼中回复，`q` 匹配主题标题或回复正文，`page`/`page_size`（缺省 20、上限 100）→ `{"items":[…],"total":N}`；**只读，不改 `view_count`**（见「帖子治理列表」） |
-| GET | `/api/community/feed` | 匿名 | 站点级评论流（跨实体聚合，带条目标题；`q` 有界窗口过滤） |
-| GET | `/api/community/entities/{id}/posts` | 匿名 | 某实体下的短评 |
+| GET | `/api/community/feed` | 匿名 | 站点级评论流（跨实体聚合，带条目标题；`q` 有界窗口过滤；停用的评论板块不出现） |
+| GET | `/api/community/entities/{id}/posts` | 匿名 | 某实体下的短评（停用的评论板块返回空列表） |
 | POST | `/api/community/entities/{id}/posts` | `community.post.create` | 发表短评 |
-| GET | `/api/community/posts/{id}` | 匿名 | 单条短评（稳定 permalink） |
+| GET | `/api/community/posts/{id}` | 匿名 | 单条短评（稳定 permalink）；停用的评论板块 404 |
 | DELETE | `/api/community/posts/{id}` | 作者 / `community.post.moderate` | 删短评（仅评论板块） |
 | PUT | `/api/community/topics/{id}/pin` | `community.topic.pin` | 置顶 / 取消置顶（`{pinned: bool}`，写 `is_pinned`；评论板块的条目不可置顶） |
 | PUT | `/api/community/boards/{code}` | `community.board.manage` | 板块配置：`names` / `descriptions`（**四语 map**，缺语种 400 `four_locale_names_required`）、`color`、`icon`、`sort_order`、`is_enabled`、`show_in_feed`；只改传入字段，`names` 不可为空，`code` 不可改，不提供新增与删除板块 |
@@ -51,6 +51,30 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 论坛主题与"实体短评"共用同一张 `community.topics`，靠板块区分语义：评论锚定实体、无独立标题、不进信息流；
 主题有标题、可独立成文、进信息流（`show_in_feed`）。
+
+### 板块：`is_enabled`（停用）与 `show_in_feed`（信息流）
+
+两个开关分工不同，不能互相替代：
+
+- **`is_enabled=false` 是"整个板块停用"**：公开读路径一律不再出现该板块及其内容 ——
+  `GET /api/community/boards`（只列已启用板块）、按板块的主题列表 `GET /api/community/topics`
+  （显式 `board_code=<停用板块>` 返回 200 + 空 `items`/`total=0`，**不是 404**：调用方给的是合法筛选，
+  事实就是"没有内容"）、主题详情 `GET /api/community/topics/{id}`（按"不存在"处理，404 `not_found`，
+  且不自增 `view_count`），以及以 `board_code` 限定的评论读路径（`/api/community/feed`、
+  `/api/community/entities/{id}/posts`、`/api/community/posts/{id}`）。
+  向停用板块**发新主题仍被拒**（400 `invalid_board`，与改造前同一判据），权限语义不变。
+- **`show_in_feed` 只管"已启用板块的主题要不要进站点信息流"**：它由前端消费（主站信息流按它过滤），
+  服务端既不解释它、也不因它过滤任何读路径。板块停用不等于退订信息流，两者各管一段。
+- **运营例外（刻意）**：持 `community.board.manage` 的调用者不受上述读过滤影响，仍能看到停用板块及其内容。
+  原因很具体：社区管理台与公开前端读的是**同一个** `GET /api/community/boards`，对运营也过滤会让管理台
+  看不到被停用的板块，也就没有把它切回来的入口——停用会变成单向操作。
+  刻意**不用查询参数**（如 `?include_disabled=1`）表达这一点：任何忘记带参数的运营客户端都会静默
+  "少看到板块"，而"少一块的列表"看起来仍然正常；授权例外只挂在权限码上，至少还能被权限审计发现。
+  运营类端点（板块配置、帖子治理列表）本来就按权限码开放，不受该过滤约束。
+
+实现上，读路径共用 `internal/handler/forum.go` 的 `enabledBoardGuard(alias)` 生成
+`NOT EXISTS (... b.code=<alias>.board_code AND NOT b.is_enabled)` 谓词，可见性判据共用 `Handler.seesDisabledBoards`；
+写路径与权限判定一概不动。真库用例见 `internal/handler/board_disabled_postgres_test.go`。
 
 ### 私信（DM）
 
@@ -106,6 +130,8 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 - **"公开可见"就是全部收藏行**：`community` 侧没有收藏公开标记、也没有用户设置表（"收藏是否公开"
   目前只是前端只读占位），因此这里与 `GET /api/users/{id}/favorites` 的 `total` 完全同口径
   （目标实体自身的可见性由读取方逐条过滤，不影响计数）；真库用例直接断言两者一致。
+- **停用板块不影响统计**：`topics_created` 数的是"我发过多少主题"这一事实，不是公开读路径，
+  因此不过滤 `is_enabled`（与"停用板块的存量主题仍归作者所有"同一口径）。
 - 不存在的用户与"没有互动记录的用户"都返回 0：账号数据不归本服务，这里不查账号库（只看 uuid 字面量）。
 
 **网关分流已就位**（主仓库 `deploy/nginx.conf`，提交 `7ab2f97`）：`/api/community/*`、`/api/favorites/*`、
