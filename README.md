@@ -149,6 +149,52 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
   （与目录侧 definitions / shelves / external_databases 同一标识，前端复用同一套错误文案）；描述允许四语全传空串来清空；
 - 库里的列全部保留，见下一节。
 
+## 审计留痕（写入侧）
+
+本服务的**全部 10 条写路由**都会往跨服务共用的 `audit.audit_log` 写一行审计（谁、什么时候、
+对什么、做了什么、结果如何）。契约是主仓库 [docs/architecture/audit-log.md](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/audit-log.md)：
+表结构、动作码命名、写入语义、脱敏规则四个服务共用（各仓各存一份同源代码，没有共享 module）。
+
+| 方法 | 路由 | 动作码 | 被动对象（`target_type` = `target_id`） |
+| --- | --- | --- | --- |
+| POST | `/api/community/topics` | `topic.created` | `topic` = 新主题 id |
+| POST | `/api/community/topics/{id}/posts` | `post.created` | `post` = 新回复 id |
+| POST | `/api/community/entities/{id}/posts` | `comment.created` | `comment` = 新短评 id |
+| PUT | `/api/community/topics/{id}/pin` | `topic.pinned` | `topic` |
+| PUT | `/api/community/boards/{code}` | `board.updated` | `board` = code |
+| DELETE | `/api/community/topics/{id}` | `topic.deleted` | `topic` |
+| DELETE | `/api/community/topics/{id}/posts/{postId}` | `post.deleted` | `post` |
+| DELETE | `/api/community/posts/{id}` | `comment.deleted` | `comment` |
+| POST | `/api/favorites/toggle` | `favorite.toggled` | `entity` = 被收藏的实体 |
+| POST | `/api/messages/with/{id}` | `message.sent` | `user` = 收件人 |
+
+三条不变式（实现 `internal/audit`，注册表与接线 `internal/handler/audit.go`）：
+
+- **审计是旁路，不参与业务事务**：非阻塞入队 + 单个后台 goroutine 落库；队列满或落库失败只记
+  error 日志并丢这一行，业务不回滚、响应不等待（丢行有 `Recorder.Dropped()` 计数）。
+- **写入前统一脱敏**：键名两级黑名单（`password`/`token`/`secret`/`hash` 等）→ `[redacted]`；
+  值里的邮箱遮罩成 `j***@example.com`；单值 512 字符、`changes` 序列化后 8KB 截断。
+  **正文、私信内容与请求体原文一概不进审计**：摘要只放身份级字段（板块、标题、锚点、楼层、
+  变更前后值），要看内容去业务表。
+- **只记登记过的写路由**：新增写端点必须在注册表里登记动作码，否则「写路由覆盖守卫」
+  （`internal/handler/audit_coverage_test.go`）失败——漏一条不会有任何其它用例报出来。
+
+三处需要知道的口径：
+
+- **本服务没有的写能力**：板块只有"改已有板块"（新增与删除由种子与后台完成，无端点）；
+  没有封禁端点（封禁归账号服务）；私信的 `read_at` 列已预留但两个端点都不读不写，因此没有
+  "已读"动作码。这些在任务清单里点名核过，都是"端点不存在"，不是漏接线。
+- **GET 不记**：`GET /api/community/topics/{id}` 会自增 `view_count`（读接口的副作用），
+  契约 §7 明确"审计只记写操作"，因此它不在注册表里；这条读接口也不回写 `X-Request-Id`。
+- **`credential_type` 是近似值**：本服务只验签与内省，分不清会话令牌与 OAuth 令牌，
+  只能给 `pat`（`Principal.FromPAT`）或 `session`（契约 §7 已记录）。
+
+读取面**不在本服务**：唯一的读取端点是账号服务的 `GET /api/admin/audit-logs`（权限码
+`auth.audit.read`），可按 `service=community`、`action`、`actor`、`target_type`/`target_id` 过滤。
+审计行与请求日志的关联键是 `X-Request-Id`：写路由缺省生成 uuid 并回写同名响应头（调用方带了就
+原样透传），同一个 id 也写进审计行的 `request_id`。表由迁移 `000007_audit_log.up.sql` 建在
+`audit` schema（跨服务共用，不属于 `community`）。
+
 ## 权限
 
 写权限以**账号服务下发的权限码**为准（访问令牌 claims 与 `/api/auth/me` 的 `permissions`，admin 组带 `*` 通配），
@@ -248,7 +294,7 @@ go run cmd/migrate -direction back
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `PORT` | `8083` | 监听端口 |
-| `DATABASE_URL` | 由 `DB_*` 拼装 | PostgreSQL 连接串（本服务只使用 `community` schema） |
+| `DATABASE_URL` | 由 `DB_*` 拼装 | PostgreSQL 连接串（业务表在 `community` schema；审计表在跨服务共用的 `audit`，见「审计留痕」） |
 | `COMMUNITY_JWKS_URL` | `http://auth:8081/api/oidc/jwks` | 验签公钥来源：账号服务是唯一签发方 |
 | `AUTH_URL` | 空 | 账号服务地址：存量不透明会话令牌的兜底解析（`GET /api/auth/me`）与 PAT 内省（`POST /api/auth/tokens/introspect`）；留空即"只接受 JWT"且 PAT 一律 `503 auth_unavailable` |
 | `AUTH_JWT_PUBLIC_KEY` | 空 | 静态公钥（PEM 或 base64 PEM）；设置后不再请求 JWKS |
