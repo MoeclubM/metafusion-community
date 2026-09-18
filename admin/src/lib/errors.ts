@@ -33,6 +33,19 @@ const CODE_KEYS: Record<string, string> = {
   invalid_board: "admin.err.invalidBoard",
   topic_locked: "admin.err.topicLocked",
   module_error: "admin.err.module",
+  // 举报与申诉（handler/reports.go、reports_admin.go）的稳定码。
+  duplicate_report: "admin.err.duplicateReport",
+  rate_limited: "admin.err.rateLimited",
+  invalid_reason: "admin.err.invalidReason",
+  invalid_target_type: "admin.err.invalidTargetType",
+  report_not_disposed: "admin.err.reportNotDisposed",
+  duplicate_appeal: "admin.err.duplicateAppeal",
+  invalid_report_state: "admin.err.invalidReportState",
+  invalid_appeal_state: "admin.err.invalidAppealState",
+  content_still_present: "admin.err.contentStillPresent",
+  enforcement_not_supported: "admin.err.enforcementNotSupported",
+  note_required: "admin.err.noteRequired",
+  not_removable: "admin.err.notRemovable",
 };
 
 /**

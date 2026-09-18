@@ -6,19 +6,21 @@ import { localeLabels, locales, type Locale } from "@/lib/i18n/routing";
 import { useSession } from "@/lib/session-context";
 import { describeError, formatLocaleList } from "@/lib/errors";
 import { LOGIN_PATH, signInHrefOnce } from "@/lib/sign-in";
-import { COMMUNITY_BOARD_MANAGE, COMMUNITY_POST_MODERATE, COMMUNITY_TOPIC_PIN } from "@/lib/permissions";
+import { COMMUNITY_BOARD_MANAGE, COMMUNITY_POST_MODERATE, COMMUNITY_REPORT_REVIEW, COMMUNITY_TOPIC_PIN } from "@/lib/permissions";
 import { BoardsPanel } from "./BoardsPanel";
 import { TopicsPanel } from "./TopicsPanel";
 import { PostsPanel } from "./PostsPanel";
+import { ReportsPanel } from "./ReportsPanel";
 import { Badge, Button, Card, Notice } from "./ui";
 
-type TabId = "boards" | "topics" | "posts";
+type TabId = "boards" | "topics" | "posts" | "reports";
 
 // 页签与权限码的对应：与服务端各端点的闸门一致（板块配置 / 置顶 / 治理内容）。
 const TABS: { id: TabId; labelKey: string; codes: string[] }[] = [
   { id: "boards", labelKey: "admin.tab.boards", codes: [COMMUNITY_BOARD_MANAGE] },
   { id: "topics", labelKey: "admin.tab.topics", codes: [COMMUNITY_TOPIC_PIN, COMMUNITY_POST_MODERATE] },
   { id: "posts", labelKey: "admin.tab.posts", codes: [COMMUNITY_POST_MODERATE] },
+  { id: "reports", labelKey: "admin.tab.reports", codes: [COMMUNITY_REPORT_REVIEW] },
 ];
 
 function readHash(): string {
@@ -182,6 +184,7 @@ export function AppShell() {
         {status === "ready" && anyAllowed && tab === "boards" && allowed.boards ? <BoardsPanel reloadKey={reloadKey} /> : null}
         {status === "ready" && anyAllowed && tab === "topics" && allowed.topics ? <TopicsPanel reloadKey={reloadKey} /> : null}
         {status === "ready" && anyAllowed && tab === "posts" && allowed.posts ? <PostsPanel reloadKey={reloadKey} /> : null}
+        {status === "ready" && anyAllowed && tab === "reports" && allowed.reports ? <ReportsPanel reloadKey={reloadKey} /> : null}
       </main>
 
       <footer className="border-t border-line pt-3 text-[11px] leading-relaxed text-muted">{t("admin.footer")}</footer>

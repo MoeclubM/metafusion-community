@@ -5,12 +5,14 @@ export const COMMUNITY_POST_CREATE = "community.post.create";
 export const COMMUNITY_POST_MODERATE = "community.post.moderate";
 export const COMMUNITY_TOPIC_PIN = "community.topic.pin";
 export const COMMUNITY_BOARD_MANAGE = "community.board.manage";
+export const COMMUNITY_REPORT_REVIEW = "community.report.review";
 
 /** 治理类码（缺权限声明时只认 role=admin），与服务的 communityPermissionCodes 同集合。 */
 export const COMMUNITY_GOVERNANCE_CODES = [
   COMMUNITY_POST_MODERATE,
   COMMUNITY_TOPIC_PIN,
   COMMUNITY_BOARD_MANAGE,
+  COMMUNITY_REPORT_REVIEW,
 ] as const;
 
 /** 老令牌（无 permissions）下仍然按"登录即可"放行的码，与服务 legacyOpenCodes 一致。 */
