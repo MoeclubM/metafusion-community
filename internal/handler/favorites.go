@@ -33,8 +33,14 @@ func (h *Handler) registerFavorites(api *gin.RouterGroup) {
 		}
 		// 目标必须存在且对请求者可见，且 kind 与声明的 target_type 相符：
 		// 收藏到不可见条目会让"谁收藏了什么"泄露编辑中的条目。
-		entity, ok := h.catalog.Lookup(c.Request.Context(), strings.TrimSpace(in.TargetID))
-		if !ok || entity.Kind != targetType {
+		// 取不到目录是 503（依赖故障），不是 404：把自己的故障说成"目标不存在"，
+		// 用户会以为条目被删了，运维在监控里也看不到这次故障。
+		entity, err := h.catalog.Lookup(c.Request.Context(), strings.TrimSpace(in.TargetID))
+		if err != nil {
+			failUpstream(c)
+			return
+		}
+		if entity.ID == "" || entity.Kind != targetType {
 			fail(c, 404, "not_found")
 			return
 		}
@@ -123,8 +129,14 @@ func (h *Handler) respondFavorites(c *gin.Context, ownerID, targetType string, l
 	}
 	out := []map[string]any{}
 	for _, f := range items {
-		raw, ok := h.catalog.LookupRaw(c.Request.Context(), f.TargetID)
-		if !ok {
+		raw, err := h.catalog.LookupRaw(c.Request.Context(), f.TargetID)
+		if err != nil {
+			// 上游不可用：整请求 503。继续拼下去会返回一份"少了几条"的收藏列表，
+			// 而调用方无从分辨是目标不可见还是目录挂了。
+			failUpstream(c)
+			return
+		}
+		if raw == nil {
 			continue // 目标不可见/已删除：跳过，不清空记录
 		}
 		var entity json.RawMessage = raw

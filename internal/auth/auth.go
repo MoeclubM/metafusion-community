@@ -19,6 +19,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/MoeclubM/metafusion-community/internal/config"
+	"github.com/MoeclubM/metafusion-community/internal/upstream"
 )
 
 // Principal 是验签后的调用者身份。只信令牌里声明的这几项信息；
@@ -42,37 +43,56 @@ type SessionResolver interface {
 	Resolve(ctx context.Context, bearer, cookie string) (*Principal, bool)
 }
 
+// authPolicy 是账号侧出站调用的策略（会话兜底与 PAT 内省共用同一套口径）：
+// 两次尝试、单次 1.5s、总预算 4s、退避 100ms/400ms、连续 5 次失败熔断 10s。
+// 账号服务在鉴权关键路径上，多打一次比"把有效凭据判成无效"便宜；但不允许无限重试。
+func authPolicy() upstream.Policy {
+	p := upstream.DefaultPolicy("auth")
+	p.Attempts = 2
+	// 单次尝试的超时与 PAT 内省共用同一个常量：两个客户端的口径必须一致。
+	p.AttemptTimeout = PATIntrospectTimeout
+	p.Budget = 4 * time.Second
+	p.BaseBackoff = 100 * time.Millisecond
+	p.MaxBackoff = 400 * time.Millisecond
+	p.Jitter = 0.5
+	p.BreakerThreshold = 5
+	p.BreakerOpenFor = 10 * time.Second
+	return p
+}
+
 // SessionClient 是与账号服务约定的兜底解析实现：把原样的 Bearer/Cookie 转给
 // `GET /api/auth/me`，由账号服务验签或查会话表后返回身份。
 // 账号服务是唯一身份来源——目录服务不参与身份判定，因此这里不指向 CATALOG_URL。
+// 出站走 internal/upstream：账号服务抖动时有界重试、连续失败则熔断快速失败，
+// 而不是每个请求各自死等一个固定超时。
 type SessionClient struct {
 	base string
-	http *http.Client
+	up   *upstream.Client
 }
 
-func NewSessionClient(baseURL string, timeout time.Duration) *SessionClient {
-	if timeout <= 0 {
-		timeout = 5 * time.Second
-	}
-	return &SessionClient{base: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: timeout}}
+func NewSessionClient(baseURL string) *SessionClient {
+	return &SessionClient{base: strings.TrimRight(strings.TrimSpace(baseURL), "/"), up: upstream.New(authPolicy())}
 }
+
+// Upstream 返回出站执行器：/ready?deep=1 的深探针与请求路径共用它（同一份熔断状态）。
+func (c *SessionClient) Upstream() *upstream.Client { return c.up }
 
 func (c *SessionClient) Resolve(ctx context.Context, bearer, cookie string) (*Principal, bool) {
 	if c.base == "" || (bearer == "" && cookie == "") {
 		return nil, false
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/auth/me", nil)
-	if err != nil {
-		return nil, false
-	}
+	header := http.Header{}
 	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
+		header.Set("Authorization", "Bearer "+bearer)
 	}
 	if cookie != "" {
-		req.AddCookie(&http.Cookie{Name: "mf_session", Value: cookie})
+		header.Add("Cookie", (&http.Cookie{Name: "mf_session", Value: cookie}).String())
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.up.Do(ctx, upstream.Request{Method: http.MethodGet, URL: c.base + "/api/auth/me", Header: header})
 	if err != nil {
+		// 兜底解析失败 = "这条令牌不是会话"，按匿名继续（401 由 Required 决定）。
+		// 这里刻意不回 503：会话兜底是存量令牌的兼容路径，账号服务抖动不该把普通匿名读请求
+		// 一律变成 503——401/503 的机器码契约只在 PAT 内省那条路径上（见 pat.go）。
 		return nil, false
 	}
 	defer resp.Body.Close()
@@ -289,6 +309,10 @@ func lookupKey(keys map[string]*rsa.PublicKey, kid string) (*rsa.PublicKey, bool
 // refreshJWKS 拉一次 JWKS。出站请求不持 mu；refreshMu + flight 让同一时刻只有一次出站请求，
 // 等待者复用同一次结果，不再各自打一次网络。未知 kid 强刷、命中缓存不刷的行为保持不变
 // （因此这里不再需要旧实现那次"再取一次"的额外出站）。
+//
+// 这里的出站**刻意不进 internal/upstream**（不加重试/熔断）：JWKS 是公钥的滚动更新源，
+// 刷不到时已有"继续用缓存公钥验签"的降级路径（见 publicKey），再加一层重试只会把验签路径拖慢。
+// 这条不在本轮跨服务降级的范围内。
 func (v *Verifier) refreshJWKS(kid string) error {
 	v.refreshMu.Lock()
 	if ch := v.flight; ch != nil {

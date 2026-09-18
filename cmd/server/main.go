@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,7 +19,21 @@ import (
 	"github.com/MoeclubM/metafusion-community/internal/handler"
 	"github.com/MoeclubM/metafusion-community/internal/nettrust"
 	"github.com/MoeclubM/metafusion-community/internal/store"
+	"github.com/MoeclubM/metafusion-community/internal/upstream"
 )
+
+// deepProbeBudget 是 /ready?deep=1 的总预算：它是给人看的诊断端点，不能被单个上游拖成慢探针。
+const deepProbeBudget = 3 * time.Second
+
+// upstreamReadyURL 是上游的探活地址；地址未配置时返回空串（ProbeAll 记 not_configured，
+// 那是部署态而不是故障——深探针不该因为"这个上游还没部署"就报 degraded）。
+func upstreamReadyURL(base string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if base == "" {
+		return ""
+	}
+	return base + "/ready"
+}
 
 func main() {
 	cfg := config.Load()
@@ -45,11 +60,14 @@ func main() {
 	}
 	// 存量兜底：浏览器可能还持有登录时的不透明会话令牌（非 JWT）。身份只能问账号服务，
 	// 因此兜底指向 AUTH_URL；未配置时退化为"只接受 JWT"（fail closed），不会静默放行。
+	// PAT（mfp_ 前缀）走内省端点 POST /api/auth/tokens/introspect，结果进程内缓存 60 秒
+	// （= 吊销窗口），见 internal/auth/pat.go。内省器无论 AUTH_URL 是否配置都注入：
+	// 未配置时它 Enabled()==false，带 mfp_ 的请求一律 503 auth_unavailable（与不注入同一条路径），
+	// 同时它也是 /ready?deep=1 探账号服务的执行器。
+	pat := auth.NewPATIntrospector(cfg.AuthURL)
+	verifier.SetPAT(pat)
 	if cfg.AuthURL != "" {
-		verifier.SetFallback(auth.NewSessionClient(cfg.AuthURL, cfg.CatalogTimeout))
-		// PAT（mfp_ 前缀）与会话兜底共用同一个账号服务地址：带 mfp_ 的请求走内省端点
-		// POST /api/auth/tokens/introspect，结果进程内缓存 60 秒（= 吊销窗口），见 internal/auth/pat.go。
-		verifier.SetPAT(auth.NewPATIntrospector(cfg.AuthURL))
+		verifier.SetFallback(auth.NewSessionClient(cfg.AuthURL))
 	} else {
 		log.Print("AUTH_URL is not configured: personal access tokens (mfp_ prefix) will be rejected with 503 auth_unavailable")
 	}
@@ -82,6 +100,8 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "live", "service": "metafusion-community"})
 	})
+	// /ready 是编排器的健康判据：浅探针只探 PG（毫秒级），deep=1 才并发探两个上游的 /ready。
+	// 深探针用请求路径上同一份执行器，探测结果因此也喂给同一个熔断器。
 	r.GET("/ready", func(c *gin.Context) {
 		check, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 		defer cancel()
@@ -89,7 +109,28 @@ func main() {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"status": "ready", "dependencies": []string{"postgres"}})
+		if c.Query("deep") != "1" {
+			c.JSON(http.StatusOK, gin.H{"status": "ready", "dependencies": []string{"postgres"}})
+			return
+		}
+		results := upstream.ProbeAll(c.Request.Context(), deepProbeBudget, []upstream.ProbeTarget{
+			{Client: cat.Upstream(), URL: upstreamReadyURL(cfg.CatalogURL)},
+			{Client: pat.Upstream(), URL: upstreamReadyURL(cfg.AuthURL)},
+		})
+		degraded := false
+		for _, res := range results {
+			// 未配置地址（not_configured）是部署态，不是故障：它不该让深探针回 503。
+			if res.Status != upstream.ProbeReady && res.Reason != upstream.ReasonNotConfigured {
+				degraded = true
+			}
+		}
+		body := gin.H{"status": "ready", "dependencies": []string{"postgres"}, "upstreams": results}
+		if degraded {
+			body["status"] = "degraded"
+			c.JSON(http.StatusServiceUnavailable, body)
+			return
+		}
+		c.JSON(http.StatusOK, body)
 	})
 
 	server := &http.Server{

@@ -24,9 +24,14 @@ package auth
 //     照字面把它们也回 401，会让 bot/CI 把有效令牌当废令牌丢掉（换令牌解决不了这些故障，重试才行）。
 //     两种映射都满足 fail-closed（都不放行），这里刻意选更诚实的那个。
 //   - 明文与哈希都不进日志、不进错误信息；缓存键是哈希，值里不含明文。
+//   - 出站调用走 internal/upstream（超时分层 + 有界重试 + 熔断，策略见 auth.go 的 authPolicy）：
+//     429/5xx/503 由执行器先做有界重试，耗尽后再按上面的映射收口，映射口径不变。
+//   - 机器码分工：**账号侧沿用 auth_unavailable，目录侧用 upstream_unavailable**，两者都是稳定
+//     机器码（前端与 bot 按码分支）。这段"三处必须同改"的说明同时存在于目录
+//     （backend/internal/catalog/pat.go）、互动（本文件）、存储（metafusion-storage/internal/auth/pat.go）
+//     三份 pat.go 里：改一处必须同时改三处，否则同一个 PAT 在三个服务上有三种行为。
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -41,6 +46,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/MoeclubM/metafusion-community/internal/upstream"
 )
 
 const (
@@ -51,8 +58,14 @@ const (
 	// PATCacheMax 是缓存条目上限：任何人都能构造带 mfp_ 前缀的字符串来喂缓存，
 	// 没有上限就是一个内存放大器；满了先清过期、再按插入序逐出最旧的一条。
 	PATCacheMax = 4096
-	// PATIntrospectTimeout 是单次内省调用的超时（含建连）：内省在请求路径上，不能拖长。
-	PATIntrospectTimeout = 3 * time.Second
+	// PATIntrospectTimeout 是账号侧出站调用的**单次尝试**超时（含建连、写完请求与读完响应体），
+	// 会话兜底与 PAT 内省共用它（见 auth.go 的 authPolicy.AttemptTimeout）。
+	// 它不再是"一次内省的总上限"：总上限由策略的 Budget（4s，含两次尝试与退避）决定，
+	// 单飞等待者的等待上限按 patWaitLimit 计算。
+	PATIntrospectTimeout = 1500 * time.Millisecond
+	// patWaitGrace 是单飞等待者的宽限：领飞者最多用满策略预算，跟随者要多等一点才不至于把
+	// "别人正在查"误判成不可用。
+	patWaitGrace = 500 * time.Millisecond
 	// patIntrospectPath 是账号服务的内省端点：请求体 {"token": "<明文>"}，不需要其它凭据。
 	patIntrospectPath = "/api/auth/tokens/introspect"
 	// patBodyLen 是前缀之后主体的长度：账号服务侧最终形状是 `^mfp_[0-9A-Za-z]{43}$`
@@ -145,10 +158,17 @@ func (p patIdentity) principal() *Principal {
 // PATIntrospector 是内省端点的客户端：60 秒进程内缓存 + 同键单飞 + 上限逐出。
 type PATIntrospector struct {
 	baseURL string
-	client  *http.Client
+	up      *upstream.Client
 	now     func() time.Time
 	cache   *patCache
 }
+
+// patWaitLimit 是单飞等待上限 = 策略总预算 + 宽限（不再是固定的"单次超时 + 1s"：
+// 那会在"两次尝试 + 退避"的预算之下就已经宣布不可用）。
+var patWaitLimit = authPolicy().Budget + patWaitGrace
+
+// Upstream 返回出站执行器：/ready?deep=1 的深探针与请求路径共用它（同一份熔断状态）。
+func (p *PATIntrospector) Upstream() *upstream.Client { return p.up }
 
 // NewPATIntrospector 用账号服务基址建内省器；baseURL 为空时内省器存在但一律判为不可用
 // （调用方据此回 503，而不是把没配置当成"凭据错"）。
@@ -163,7 +183,7 @@ func newPATIntrospector(baseURL string, now func() time.Time) *PATIntrospector {
 	}
 	return &PATIntrospector{
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		client:  &http.Client{Timeout: PATIntrospectTimeout},
+		up:      upstream.New(authPolicy()),
 		now:     now,
 		cache:   newPATCache(now),
 	}
@@ -237,15 +257,20 @@ func (p *PATIntrospector) fetch(ctx context.Context, token string) (patCacheEntr
 	if err != nil {
 		return patCacheEntry{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+patIntrospectPath, bytes.NewReader(payload))
-	if err != nil {
-		return patCacheEntry{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	resp, err := p.client.Do(req)
+	header := http.Header{}
+	header.Set("Content-Type", "application/json")
+	header.Set("Accept", "application/json")
+	// 明文只在这一趟里出现；重试由执行器用同一份 []byte 重建请求体（传 reader 的重试会静默发空体）。
+	resp, err := p.up.Do(ctx, upstream.Request{
+		Method: http.MethodPost,
+		URL:    p.baseURL + patIntrospectPath,
+		Header: header,
+		Body:   payload,
+	})
 	if err != nil {
 		// 错误文本只带端点与网络原因：明文与哈希都不进来（这条错误可能被上层记录）。
+		// 执行器的错误（超时/连接失败/熔断打开/重试耗尽）一律在此收口，
+		// 由 Introspect 的调用方映射成 503 auth_unavailable —— 映射口径不变。
 		return patCacheEntry{}, fmt.Errorf("pat introspect request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -255,13 +280,11 @@ func (p *PATIntrospector) fetch(ctx context.Context, token string) (patCacheEntr
 		// 账号服务的判定结论：无效 / 已吊销 / 已过期 / 封禁统一 401 invalid_token，
 		// 这是可缓存的确定结论（同一个令牌 60 秒内不必再问一次）。
 		return patCacheEntry{cachedUntil: p.now().Add(PATCacheTTL)}, nil
-	case http.StatusServiceUnavailable:
-		// 账号服务"读不动库"的专用码：按依赖不可用回 503，绝不当成"令牌无效"。
-		return patCacheEntry{}, fmt.Errorf("pat introspect unavailable (%d)", resp.StatusCode)
 	default:
-		// 其余非 200（404 = 账号服务还没上这个端点/部署顺序不对，429 = 内省限流，5xx = 服务异常）
-		// 统统按依赖不可用回 503：它们都不是"令牌无效"的证据，回 401 会让 bot/CI
-		// 把有效令牌当废令牌丢掉（换令牌解决不了这些故障，重试才行）。
+		// 其余状态码（404 = 账号服务还没上这个端点/部署顺序不对，429 = 内省限流，
+		// 503 = 账号服务读不动库，5xx = 服务异常）统统按依赖不可用回 503：
+		// 它们都不是"令牌无效"的证据，回 401 会让 bot/CI 把有效令牌当废令牌丢掉
+		// （换令牌解决不了这些故障，重试才行）。429/503/5xx 已由执行器先做过有界重试与熔断。
 		return patCacheEntry{}, fmt.Errorf("pat introspect status %d", resp.StatusCode)
 	}
 	var doc patIntrospectResponse
@@ -328,10 +351,10 @@ func newPATCache(now func() time.Time) *patCache {
 
 // resolve 走完整的"缓存 → 单飞 → 真调用"流程：fn 只在缓存未命中且没有同键在飞时被调用。
 //
-// 等待上限是 PATIntrospectTimeout + 1s：账号服务抖动时不能让请求无限排队等着别人的调用，
+// 等待上限是 patWaitLimit（策略总预算 + 宽限）：账号服务抖动时不能让请求无限排队等着别人的调用，
 // 超时即按不可用返回（调用方回 503），而不是挂住连接。
 func (c *patCache) resolve(key string, fn func() (patCacheEntry, error)) (patCacheEntry, error) {
-	deadline := c.now().Add(PATIntrospectTimeout + time.Second)
+	deadline := c.now().Add(patWaitLimit)
 	for {
 		c.mu.Lock()
 		if entry, ok := c.entries[key]; ok {

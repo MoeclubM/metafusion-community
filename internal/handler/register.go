@@ -11,6 +11,7 @@ import (
 	"github.com/MoeclubM/metafusion-community/internal/auth"
 	"github.com/MoeclubM/metafusion-community/internal/catalog"
 	"github.com/MoeclubM/metafusion-community/internal/store"
+	"github.com/MoeclubM/metafusion-community/internal/upstream"
 )
 
 // Handler 承载互动服务的 HTTP 契约：论坛（/api/community/*）、收藏与用户统计
@@ -111,8 +112,15 @@ func (h *Handler) require(code string) gin.HandlerFunc {
 func (h *Handler) principal(c *gin.Context) *auth.Principal { return auth.Current(c) }
 
 // entity 确认实体对调用者可见；不可见一律 404，不区分"不存在"与"无权限"。
+// 取不到目录是另一回事：503 + upstream_unavailable。把它当成 404 会让"依赖挂了"以
+// "这个条目不存在"的形式呈现给用户与监控，正是这次要消掉的静默降级。
 func (h *Handler) entity(c *gin.Context, id string) bool {
-	if _, ok := h.catalog.Lookup(c.Request.Context(), id); !ok {
+	e, err := h.catalog.Lookup(c.Request.Context(), id)
+	if err != nil {
+		failUpstream(c)
+		return false
+	}
+	if e.ID == "" {
 		fail(c, 404, "not_found")
 		return false
 	}
@@ -128,6 +136,13 @@ func Seed(ctx context.Context, db *sql.DB) error { return seedForum(ctx, db) }
 func fail(c *gin.Context, status int, code string) {
 	audit.Fail(c, code)
 	c.JSON(status, gin.H{"error": code})
+}
+
+// failUpstream 是"取不到上游"的唯一出口：503 + 稳定机器码 upstream_unavailable。
+// 调用方（前端/bot）按码分支，而不是把依赖故障误读成"这个实体不存在/不可见"。
+// 账号侧（PAT/会话）沿用既有的 auth_unavailable，两码分工见 internal/auth/pat.go 的注释。
+func failUpstream(c *gin.Context) {
+	fail(c, http.StatusServiceUnavailable, upstream.CodeUpstreamUnavailable)
 }
 
 // body 统一写接口的请求解析：2MB 上限，错误码与主仓库一致。

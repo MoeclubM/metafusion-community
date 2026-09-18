@@ -238,7 +238,10 @@ func scanTopic(rows *sql.Rows) (topicRow, error) {
 // attachTopicEntities 经 Catalog 接口批量补齐主题锚定实体的标题与 kind，
 // 与评论信息流用同一边界取元信息，不直接 JOIN catalog 表。不可见或已删除的
 // 实体不注入字段，前端据此不渲染关联横幅。
-func attachTopicEntities(ctx context.Context, h *Handler, items []map[string]any) {
+//
+// 返回错误 = 目录取不到：读路径的调用方必须按 503 处理——"取不到标题"与"没有标题"
+// 在响应里长得一模一样，前者被当成后者就是列表里标题整片消失。
+func attachTopicEntities(ctx context.Context, h *Handler, items []map[string]any) error {
 	ids := []string{}
 	seen := map[string]bool{}
 	for _, it := range items {
@@ -249,10 +252,13 @@ func attachTopicEntities(ctx context.Context, h *Handler, items []map[string]any
 		}
 	}
 	if len(ids) == 0 {
-		return
+		return nil
 	}
-	// 目录没有批量端点：批量取投影时逐条并发，单条失败即视为不可见（跳过该条）。
-	meta := h.catalog.LookupMany(ctx, ids)
+	// 目录没有批量端点：批量取投影时逐条并发；单条不可见只跳过该条，上游不可用则整体报错。
+	meta, err := h.catalog.LookupMany(ctx, ids)
+	if err != nil {
+		return err
+	}
 	for _, it := range items {
 		id, _ := it["entity_id"].(string)
 		e, ok := meta[id]
@@ -262,6 +268,7 @@ func attachTopicEntities(ctx context.Context, h *Handler, items []map[string]any
 		it["entity_title"] = e.Title
 		it["entity_kind"] = e.Kind
 	}
+	return nil
 }
 
 // forumTag 是主题标签的对外形状，与 /community/topic-tags（标签清单）一致：
@@ -388,7 +395,10 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 				it["tags"] = []forumTag{}
 			}
 		}
-		attachTopicEntities(c.Request.Context(), h, items)
+		if err := attachTopicEntities(c.Request.Context(), h, items); err != nil {
+			failUpstream(c)
+			return
+		}
 		c.JSON(200, gin.H{"items": items, "total": total})
 	})
 
@@ -467,7 +477,10 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			out["tags"] = []forumTag{}
 		}
 		single := []map[string]any{out}
-		attachTopicEntities(c.Request.Context(), h, single)
+		if err := attachTopicEntities(c.Request.Context(), h, single); err != nil {
+			failUpstream(c)
+			return
+		}
 		c.JSON(200, out)
 	})
 
@@ -825,7 +838,9 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			"board_code": boardCode, "is_pinned": auditChange(wasPinned, *in.Pinned),
 		}})
 		out := t.toMap()
-		attachTopicEntities(c.Request.Context(), h, []map[string]any{out})
+		// 置顶已经落库：这里取不到目录只影响装饰字段（entity_title），
+		// 不能把一个已经生效的写请求回成 503——调用方会重试一次已经发生的写操作。
+		_ = attachTopicEntities(c.Request.Context(), h, []map[string]any{out})
 		c.JSON(200, out)
 	})
 }

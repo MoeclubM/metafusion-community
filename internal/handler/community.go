@@ -83,7 +83,13 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 		}
 		rows.Close()
 		// 一次性批量取元信息与可见性；不可见或已删除的条目，其评论不再展示。
-		meta := h.catalog.LookupMany(c.Request.Context(), ids)
+		// 取不到目录必须整请求 503：缺的那些条目分不清"不可见"还是"取不到"，
+		// 拿部分结果渲染列表就是"条目凭空消失"（q 搜索时更明显）。
+		meta, err := h.catalog.LookupMany(c.Request.Context(), ids)
+		if err != nil {
+			failUpstream(c)
+			return
+		}
 		needle := strings.ToLower(q)
 		items := []map[string]any{}
 		for _, r := range raw {
@@ -253,8 +259,13 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 		// 关联实体的可见性：匿名只应看到 published 条目的评论。
 		title, kind := "", ""
 		if entityID != "" {
-			meta, ok := h.catalog.Lookup(c.Request.Context(), entityID)
-			if !ok {
+			meta, err := h.catalog.Lookup(c.Request.Context(), entityID)
+			if err != nil {
+				failUpstream(c)
+				return
+			}
+			// 零值 = 不可见/已删除：与"条目不存在"同一处理（404），不区分是哪种。
+			if meta.ID == "" {
 				fail(c, 404, "not_found")
 				return
 			}
@@ -273,9 +284,10 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 		if !h.entity(c, id) {
 			return
 		}
-		cols := h.catalog.Related(c.Request.Context(), id, []string{"collection"})
-		if cols == nil {
-			c.JSON(200, gin.H{"items": []any{}})
+		cols, err := h.catalog.Related(c.Request.Context(), id, []string{"collection"})
+		if err != nil {
+			// 上游不可用：不能回空 items —— "没有关联合集"与"取不到关联合集"是两件事。
+			failUpstream(c)
 			return
 		}
 		if len(cols) > 20 {

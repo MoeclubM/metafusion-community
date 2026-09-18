@@ -52,6 +52,26 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 论坛主题与"实体短评"共用同一张 `community.topics`，靠板块区分语义：评论锚定实体、无独立标题、不进信息流；
 主题有标题、可独立成文、进信息流（`show_in_feed`）。
 
+### 跨服务依赖不可用（目录 / 账号）
+
+读路径要先问目录（实体可见性、标题、关系邻居）与账号（会话兜底、PAT 内省）。这两类出站调用走
+`internal/upstream`（超时分层 + 有界重试 + 熔断），失败**不再折成空结果**：
+
+- 目录侧取不到（超时 / 连接失败 / 5xx / 429 / 熔断打开）→ `503` + `{"error":"upstream_unavailable"}`。
+  受影响的是所有需要目录才能成形响应的端点：`GET /api/community/feed`（评论流）、主题列表与详情
+  （`entity_title`）、`GET /api/community/posts/{id}`、`GET /api/community/entities/{id}/collections`、
+  `POST /api/favorites/toggle`、`GET /api/favorites/mine`、`GET /api/users/{id}/favorites`。
+  目录**明确回答**"不可见/不存在"（404）时口径不变：仍是 404 `not_found`，或跳过该条目标。
+  唯一例外：`PUT /api/community/topics/{id}/pin` 已经落库，取不到题名只影响装饰字段，仍回 200
+  （把一次已生效的写回成 503 会让调用方重试一次已经发生的写操作）。
+- 账号侧沿用既有机器码（见「权限」）：无效/吊销仍是 401 `invalid_token`，账号服务不可达是
+  503 `auth_unavailable`；会话兜底失败仍按匿名继续，只有 PAT 内省才回 503。
+- 策略口径：目录 3 次尝试 / 单次 2s / 总预算 7s / 连续 5 次失败熔断 10s；账号 2 次尝试 / 单次 1.5s /
+  总预算 4s / 熔断 10s。调用方自己取消（关页面）不算上游故障，也不进熔断计数。
+- `GET /ready` 仍是毫秒级浅探针（只探 PG）；`GET /ready?deep=1` 并发探 `CATALOG_URL/ready` 与
+  `AUTH_URL/ready`（总预算 3s），响应带 `upstreams`，任一上游不可用时回 503 + `status:"degraded"`
+  （未配置地址记 `not_configured`，那是部署态，不算故障）。
+
 ### 板块：`is_enabled`（停用）与 `show_in_feed`（信息流）
 
 两个开关分工不同，不能互相替代：
@@ -306,7 +326,8 @@ go run cmd/migrate -direction back
 | `AUTH_JWT_PUBLIC_KEY` | 空 | 静态公钥（PEM 或 base64 PEM）；设置后不再请求 JWKS |
 | `AUTH_JWT_ISSUER` / `AUTH_JWT_AUDIENCE` | `https://findverse.cc/api` / `metafusion` | 与主仓库一致，避免存量令牌失效 |
 | `CATALOG_URL` | `http://backend:8080` | 目录服务地址（可见性、标题、关系邻居） |
-| `COMMUNITY_CATALOG_TIMEOUT_MS` | `5000` | 单次目录调用超时 |
+| `COMMUNITY_CATALOG_TIMEOUT_MS` | `5000` | 目录调用总预算的**下限**（策略自带 7s，含 3 次尝试）；调小不生效——预算被调小会砍掉重试，见「跨服务依赖不可用」 |
+| `TRUSTED_PROXIES` | 空 | 应用层信任的反向代理范围（IP/CIDR 逗号分隔；留空 = 回环 + RFC1918 私网 = 网关容器所在网段，`none` = 入口链上没有代理）。决定审计 `actor_ip` 与按 IP 限流所用的 `ClientIP()`；非法项直接拒绝启动 |
 
 ## 运行
 
