@@ -40,7 +40,7 @@ import (
 const ServiceName = "community"
 
 // Schema 是审计表的建表语句：与契约 §1 **逐字一致**（四个服务各存一份同样的 DDL，
-// 谁先启动谁建表，其余服务走 IF NOT EXISTS 幂等路径）。
+// 谁先启动谁建表，其余服务走 to_regclass 守卫的幂等路径）。
 //
 // 为什么用 audit 独立 schema：它不是任何单个服务的领域数据（互动服务的库里有 community 与 audit
 // 两个 schema，读得到 catalog/auth 的行是刻意的，见契约 §5）；为什么不建外键：账号删了审计还得在。
@@ -48,33 +48,49 @@ const ServiceName = "community"
 // lib/pq 作为隐式事务批处理发送，锁因此覆盖到建表结束，避免两条 CREATE TABLE 撞在 pg_type
 // 的唯一索引上。互动服务的迁移器（internal/migrator）把整个迁移文件一次 ExecContext，
 // 本服务的建表与它外层的事务级迁移锁是同一个键，同事务内重复获取是安全的。
+//
+// **为什么整段包在 to_regclass 守卫里**（真库实测，2026-09-19）：PostgreSQL 的
+// `CREATE INDEX IF NOT EXISTS` 会**先做表所有权检查、再看索引是否存在**（`CREATE TABLE IF NOT EXISTS`
+// 不同，它只要求 schema 的 CREATE）。四个服务启动都会执行这段 DDL，而表由部署时的 mf_audit_owner
+// 预建——不做守卫的话，非 owner 的运行角色会拿到 `42501 must be owner of table audit_log`，
+// 四个服务全部起不来（实测：预建后四服务全挂；不预建让 community 先建，另三个全挂）。
+// 守卫让"表已存在"的实例上整段变成纯空转：所有 DDL 与所有权检查都不会被触发。
+// 索引因此不再写 IF NOT EXISTS（它们在守卫内，表是刚建的）；锁用 PERFORM 放进守卫里，
+// 仍然在建表之前取。拆掉守卫或把索引写回 IF NOT EXISTS 会被
+// TestAuditSchemaUsesExistenceGuard 拦下。
 const Schema = `
-CREATE SCHEMA IF NOT EXISTS audit;
-SELECT pg_advisory_xact_lock(740205);
-CREATE TABLE IF NOT EXISTS audit.audit_log (
-  id               uuid PRIMARY KEY,
-  occurred_at      timestamptz NOT NULL DEFAULT now(),
-  service          text NOT NULL,
-  action           text NOT NULL,
-  actor_user_id    uuid,
-  actor_username   text NOT NULL DEFAULT '',
-  credential_type  text NOT NULL DEFAULT '',
-  actor_ip         text NOT NULL DEFAULT '',
-  actor_user_agent text NOT NULL DEFAULT '',
-  target_type      text NOT NULL DEFAULT '',
-  target_id        text NOT NULL DEFAULT '',
-  changes          jsonb NOT NULL DEFAULT '{}'::jsonb,
-  result           text NOT NULL DEFAULT 'success' CHECK (result IN ('success','failure')),
-  error_code       text NOT NULL DEFAULT '',
-  request_method   text NOT NULL DEFAULT '',
-  route            text NOT NULL DEFAULT '',
-  http_status      int NOT NULL DEFAULT 0,
-  request_id       text NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS audit_log_occurred_at_idx ON audit.audit_log(occurred_at DESC);
-CREATE INDEX IF NOT EXISTS audit_log_service_action_idx ON audit.audit_log(service, action, occurred_at DESC);
-CREATE INDEX IF NOT EXISTS audit_log_actor_idx ON audit.audit_log(actor_user_id, occurred_at DESC);
-CREATE INDEX IF NOT EXISTS audit_log_target_idx ON audit.audit_log(target_type, target_id, occurred_at DESC);
+DO $audit_ddl$
+BEGIN
+  PERFORM pg_advisory_xact_lock(740205);
+  IF to_regclass('audit.audit_log') IS NULL THEN
+    CREATE SCHEMA IF NOT EXISTS audit;
+    CREATE TABLE audit.audit_log (
+      id               uuid PRIMARY KEY,
+      occurred_at      timestamptz NOT NULL DEFAULT now(),
+      service          text NOT NULL,
+      action           text NOT NULL,
+      actor_user_id    uuid,
+      actor_username   text NOT NULL DEFAULT '',
+      credential_type  text NOT NULL DEFAULT '',
+      actor_ip         text NOT NULL DEFAULT '',
+      actor_user_agent text NOT NULL DEFAULT '',
+      target_type      text NOT NULL DEFAULT '',
+      target_id        text NOT NULL DEFAULT '',
+      changes          jsonb NOT NULL DEFAULT '{}'::jsonb,
+      result           text NOT NULL DEFAULT 'success' CHECK (result IN ('success','failure')),
+      error_code       text NOT NULL DEFAULT '',
+      request_method   text NOT NULL DEFAULT '',
+      route            text NOT NULL DEFAULT '',
+      http_status      int NOT NULL DEFAULT 0,
+      request_id       text NOT NULL DEFAULT ''
+    );
+    CREATE INDEX audit_log_occurred_at_idx ON audit.audit_log(occurred_at DESC);
+    CREATE INDEX audit_log_service_action_idx ON audit.audit_log(service, action, occurred_at DESC);
+    CREATE INDEX audit_log_actor_idx ON audit.audit_log(actor_user_id, occurred_at DESC);
+    CREATE INDEX audit_log_target_idx ON audit.audit_log(target_type, target_id, occurred_at DESC);
+  END IF;
+END
+$audit_ddl$;
 `
 
 // 凭据类型取值（契约 §1 的 credential_type 列）。互动服务只验签 / 内省，分不清"会话令牌"与
