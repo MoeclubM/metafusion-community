@@ -85,6 +85,14 @@ var frozenOwnTableDefs = map[string]map[string]string{
 		"created_at":   "created_at timestamptz not null default now()",
 		"read_at":      "read_at timestamptz",
 	},
+	// 私信收件设置（000010）：收件人侧开关。默认值写在 DDL 里（true = 接收陌生人私信），
+	// 而"没行 = 默认"这条语义由 store.MessageSettings 的 sql.ErrNoRows 分支保证 ——
+	// 它不在这一份结构断言里，由真库用例钉住（TestMessageInboxAgainstPostgres 的陌生人开关段）。
+	"community.direct_message_settings": {
+		"user_id":               "user_id uuid primary key",
+		"accept_from_strangers": "accept_from_strangers boolean not null default true",
+		"updated_at":            "updated_at timestamptz not null default now()",
+	},
 	// 举报与申诉（000008）：三张表的列定义逐字冻结。status / reason / target_type / enforcement
 	// 的 CHECK 词表必须与 store/reports.go 里的词表一致（由 reports_schema_test.go 交叉断言）。
 	"community.reports": {

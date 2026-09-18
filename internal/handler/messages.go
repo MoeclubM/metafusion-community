@@ -31,6 +31,14 @@ import (
 //	PUT  /api/messages/with/{id}/read                -> {"marked":N}
 //	GET  /api/messages/conversations?page&page_size   -> {"items":[{peer_id,last_message,unread_count}],"total":N}
 //	GET  /api/messages/unread                        -> {"unread_count":N}
+//	GET  /api/messages/settings                      -> {"accept_from_strangers":bool}
+//	PUT  /api/messages/settings {"accept_from_strangers":bool} -> {"accept_from_strangers":bool}
+//
+// 收件人侧开关与发信侧的机器码：
+// **收件人关闭"接收陌生人私信"后，陌生人（这一对之间还没有任何私信的人）发信会拿到
+// 403 recipient_not_accepting_messages —— 稳定机器码，前端有对应文案；**不再静默丢弃**。
+// 已有会话的一方不受影响（关闭开关的效果是"只接收已经聊过的人的私信"）。
+// 陌生人**发起新会话**另外受每小时 5 个的额度约束（见 message_limit.go），超限 429 rate_limited。
 
 // maxMessageBodyRunes 是一条私信的正文上限，按**字符数**（rune）算而不是字节数。
 // 契约里写的是"4000 字符"：按字节算会把中文上限压到约 1/3（4000 字节 ≈ 1333 个汉字），
@@ -83,7 +91,11 @@ func (h *Handler) registerMessages(api *gin.RouterGroup) {
 		}
 		// 频率限制放在正文校验之前：超限的调用方需要知道的是"慢一点"，
 		// 而不是"这条正文格式不对"；先校验会让刷量请求拿到逐条不同的错误码。
+		// 审计行用 changes.limit 区分是哪一档拦的（机器码统一为 rate_limited）。
 		if ok, retryAfter := h.messages.allow(p.ID); !ok {
+			audit.Describe(c, audit.Detail{TargetType: "user", TargetID: peerID, Changes: map[string]any{
+				"limit": "sender_window",
+			}})
 			c.Header("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
 			fail(c, http.StatusTooManyRequests, "rate_limited")
 			return
@@ -98,6 +110,33 @@ func (h *Handler) registerMessages(api *gin.RouterGroup) {
 		if code != "" {
 			fail(c, 400, code)
 			return
+		}
+		// 收件人侧的开关与"这一对是不是陌生人"一次问清（store.SendPolicy，一条查询）。
+		// 判定放在正文校验之后：正文是本地 CPU 校验，先做它就不必为一份垃圾载荷去读库。
+		policy, err := h.store.SendPolicy(c.Request.Context(), p.ID, peerID)
+		if err != nil {
+			fail(c, 500, "module_error")
+			return
+		}
+		if !policy.HasConversation && !policy.AcceptsFromStrangers {
+			// 稳定机器码，**不是静默丢弃**：发送方要知道自己没发出去、以及为什么。
+			// 审计行留痕（被拒的写请求恰恰是最该留痕的一类），被动对象是想发给谁。
+			audit.Describe(c, audit.Detail{TargetType: "user", TargetID: peerID, Changes: map[string]any{
+				"rejected": "recipient_disallows_strangers",
+			}})
+			fail(c, http.StatusForbidden, "recipient_not_accepting_messages")
+			return
+		}
+		if !policy.HasConversation {
+			// 陌生人新会话额度（第 2 档）：已有会话的一方不扣它，因此"继续聊"永远不会被它拦住。
+			if ok, retryAfter := h.messages.allowStranger(p.ID); !ok {
+				audit.Describe(c, audit.Detail{TargetType: "user", TargetID: peerID, Changes: map[string]any{
+					"limit": "new_stranger",
+				}})
+				c.Header("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+				fail(c, http.StatusTooManyRequests, "rate_limited")
+				return
+			}
 		}
 		msg, err := h.store.SendMessage(c.Request.Context(), uuid.NewString(), p.ID, peerID, text)
 		if err != nil {
@@ -155,6 +194,51 @@ func (h *Handler) registerMessages(api *gin.RouterGroup) {
 			"marked": marked,
 		}})
 		c.JSON(200, gin.H{"marked": marked})
+	})
+
+	// 收件设置（我自己的）：读当前值。
+	//
+	// 响应是**扁平**的一个布尔，不套信封：只有一个字段的设置再包一层 {"settings":…} 只会让
+	// 每个调用点多写一次解包；与 /api/users/{id}/stats 那种"多字段成组"的形状不同，不必强行统一。
+	api.GET("/messages/settings", h.guard(true), func(c *gin.Context) {
+		accept, err := h.store.MessageSettings(c.Request.Context(), h.principal(c).ID)
+		if err != nil {
+			fail(c, 500, "module_error")
+			return
+		}
+		c.JSON(200, gin.H{"accept_from_strangers": accept})
+	})
+
+	// 收件设置：改自己的值。字段用 *bool 区分"没传"与"传了 false"——
+	// Go 的 bool 零值会让"漏传字段"被当成"用户要关闭"，那是最坏的一种默认。
+	api.PUT("/messages/settings", h.guard(true), func(c *gin.Context) {
+		p := h.principal(c)
+		var in struct {
+			AcceptFromStrangers *bool `json:"accept_from_strangers"`
+		}
+		if !body(c, &in) {
+			return
+		}
+		if in.AcceptFromStrangers == nil {
+			fail(c, 400, "invalid_payload")
+			return
+		}
+		before, err := h.store.MessageSettings(c.Request.Context(), p.ID)
+		if err != nil {
+			fail(c, 500, "module_error")
+			return
+		}
+		after, err := h.store.SetMessageSettings(c.Request.Context(), p.ID, *in.AcceptFromStrangers)
+		if err != nil {
+			fail(c, 500, "module_error")
+			return
+		}
+		// 设置项进审计：被动对象是**设置的所有者本人**（不是对方），changes 记前后值。
+		// 这类"隐私开关被谁在什么时候改了"的问题，只能靠审计回答。
+		audit.Describe(c, audit.Detail{TargetType: "user", TargetID: p.ID, Changes: map[string]any{
+			"accept_from_strangers": auditChange(before, after),
+		}})
+		c.JSON(200, gin.H{"accept_from_strangers": after})
 	})
 }
 

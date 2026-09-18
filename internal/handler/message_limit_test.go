@@ -72,6 +72,49 @@ func TestMessageLimiter(t *testing.T) {
 	}
 }
 
+// 陌生人新会话额度（第 2 档）是独立的一档：容量更小、窗口更长，且**不消耗总体桶的语义**
+// （两档各自独立计费，谁先耗尽谁拦），与"总体 20/分钟"是交集关系。
+func TestMessageLimiterStrangerQuota(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	l := newMessageLimiter()
+	l.now = func() time.Time { return now }
+
+	// 1) 容量：5 个新陌生人会话放行，第 6 个被拒，等待时间落在 (0, 1h]。
+	for i := 0; i < messageStrangerBurst; i++ {
+		if ok, _ := l.allowStranger("u1"); !ok {
+			t.Fatalf("第 %d 个新会话就被拒了（容量应至少 %d）", i+1, messageStrangerBurst)
+		}
+	}
+	ok, wait := l.allowStranger("u1")
+	if ok {
+		t.Fatal("超过陌生人额度仍被放行")
+	}
+	if wait <= 0 || wait > messageStrangerWindow {
+		t.Fatalf("Retry-After 窗口不合理：%v（应在 (0, %v] 内）", wait, messageStrangerWindow)
+	}
+
+	// 2) 两档互不串账：陌生人桶打满不影响同账号的总体发送额度（继续聊已有会话照常发）。
+	if ok, _ := l.allow("u1"); !ok {
+		t.Fatal("陌生人桶打满不该影响总体发送额度（已有会话仍要能发）")
+	}
+	// 反向：总体桶打满也不影响陌生人桶自己的余额（判据在处理器里按序执行）。
+	if _, _ = l.allowStranger("u2"); !func() bool { ok, _ := l.allowStranger("u3"); return ok }() {
+		t.Fatal("另一个账号的陌生人额度应独立")
+	}
+
+	// 3) 满一小时回满：回满后第 6 个新会话重新可用。
+	now = now.Add(messageStrangerWindow)
+	allowed := 0
+	for i := 0; i < messageStrangerBurst+3; i++ {
+		if ok, _ := l.allowStranger("u1"); ok {
+			allowed++
+		}
+	}
+	if allowed != messageStrangerBurst {
+		t.Fatalf("回满后连发 %d 个新会话，期望恰好容量 %d 个", allowed, messageStrangerBurst)
+	}
+}
+
 // 桶数量有硬上限：短时间灌进大量互不相同的 key（未登录也能撞出来的形状）不能把内存吃光。
 // 代价是触顶时被清掉的桶会重新拿到满额令牌——那是内存安全阀的已知取舍，写在这里免得被当成熟 bug。
 func TestMessageLimiterBoundedMemory(t *testing.T) {
@@ -83,7 +126,7 @@ func TestMessageLimiterBoundedMemory(t *testing.T) {
 		l.allow(fmt.Sprintf("bulk-%d", i))
 	}
 	l.mu.Lock()
-	size := len(l.buckets)
+	size := len(l.general.buckets)
 	l.mu.Unlock()
 	if size > messageLimiterMaxKeys {
 		t.Fatalf("桶数量 %d 超过硬上限 %d：清理没有生效", size, messageLimiterMaxKeys)
@@ -96,7 +139,7 @@ func TestMessageLimiterBoundedMemory(t *testing.T) {
 		l.allow(fmt.Sprintf("later-%d", i))
 	}
 	l.mu.Lock()
-	_, stale := l.buckets["bulk-0"]
+	_, stale := l.general.buckets["bulk-0"]
 	l.mu.Unlock()
 	if stale {
 		t.Fatal("空闲超过阈值的桶应被清掉")

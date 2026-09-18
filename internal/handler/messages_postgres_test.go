@@ -543,3 +543,242 @@ func assertPlanUsesIndex(t *testing.T, tx *sql.Tx, index, userID, query string) 
 		t.Fatalf("关掉 seqscan 后仍在全表扫：\n%s", joined)
 	}
 }
+
+// 陌生人私信开关（收件人侧）与两档限流的真库语义：
+// 默认接收 → 关闭后陌生人 403 recipient_not_accepting_messages（留痕、不落库）→ 已有会话不受影响 →
+// 重新打开可发 → 设置项进审计 → 陌生人新会话额度第 6 个 429 → 收件箱未读优先排序。
+//
+// 夹具与清理口径同上：身份全是新建 uuid，跑完按参与者删行（设置行一并删）。
+func TestMessageStrangerSwitchAgainstPostgres(t *testing.T) {
+	ctx, db, router, key, kid := opsFixture(t)
+	alice, bob := uuid.NewString(), uuid.NewString()
+	carol, dave, erin, frank := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	ids := []string{alice, bob, carol, dave, erin, frank}
+	cleanup := func() {
+		cleanupDirectMessages(ctx, db, ids...)
+		if _, err := db.ExecContext(ctx, "DELETE FROM community.direct_message_settings WHERE user_id = ANY($1::uuid[])", pq.Array(ids)); err != nil {
+			t.Fatalf("清理设置行: %v", err)
+		}
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	token := func(id string) string {
+		return signTokenWith(t, key, kid, id, "user", []string{"member"}, []string{auth.PermissionPostCreate})
+	}
+	send := func(from, to, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		return opsCall(t, router, http.MethodPost, "/api/messages/with/"+to, `{"body":"`+body+`"}`, token(from))
+	}
+	pairRows := func(a, b string) int {
+		t.Helper()
+		var n int
+		if err := db.QueryRow(`SELECT count(*) FROM community.direct_messages
+			WHERE (sender_id=$1::uuid AND recipient_id=$2::uuid) OR (sender_id=$2::uuid AND recipient_id=$1::uuid)`,
+			a, b).Scan(&n); err != nil {
+			t.Fatalf("数这一对的行: %v", err)
+		}
+		return n
+	}
+
+	// 1) 设置端点：匿名 401；字段缺失/换型 400 invalid_payload（*bool 区分"没传"与"传了 false"）。
+	for _, tc := range []struct{ method, path, payload string }{
+		{http.MethodGet, "/api/messages/settings", ""},
+		{http.MethodPut, "/api/messages/settings", `{"accept_from_strangers":false}`},
+	} {
+		if w := opsCall(t, router, tc.method, tc.path, tc.payload, ""); w.Code != 401 || opsErrorCode(t, w) != "authentication_required" {
+			t.Fatalf("%s %s 匿名应 401 authentication_required，实际 %d（%s）", tc.method, tc.path, w.Code, w.Body.String())
+		}
+	}
+	for _, payload := range []string{`{}`, `{"accept_from_strangers":"yes"}`} {
+		w := opsCall(t, router, http.MethodPut, "/api/messages/settings", payload, token(bob))
+		if w.Code != 400 || opsErrorCode(t, w) != "invalid_payload" {
+			t.Fatalf("载荷 %s 应 400 invalid_payload，实际 %d（%s）", payload, w.Code, w.Body.String())
+		}
+	}
+
+	// 2) 默认接收：没有设置行的用户，陌生人（这一对之间没有任何私信）能发进来。
+	if got := messageSettings(t, router, token(bob)); got != true {
+		t.Fatalf("没设置过应是默认接收，实际 %v", got)
+	}
+	if w := send(alice, bob, "陌生人第一条"); w.Code != 200 {
+		t.Fatalf("默认接收时陌生人应能发，实际 %d（%s）", w.Code, w.Body.String())
+	}
+
+	// 3) 关闭开关：carol 与 bob 之间没有任何私信 → 403 稳定机器码，**不落库**，且留痕。
+	if got := setMessageSettings(t, router, token(bob), false); got != false {
+		t.Fatalf("PUT 之后应回 false，实际 %v", got)
+	}
+	blocked := send(carol, bob, "陌生人被拒")
+	if blocked.Code != http.StatusForbidden || opsErrorCode(t, blocked) != "recipient_not_accepting_messages" {
+		t.Fatalf("关闭后陌生人应 403 recipient_not_accepting_messages，实际 %d（%s）", blocked.Code, blocked.Body.String())
+	}
+	if n := pairRows(carol, bob); n != 0 {
+		t.Fatalf("被拒的发送不得落库，实际 %d 行", n)
+	}
+	if rid := blocked.Header().Get("X-Request-Id"); rid != "" {
+		row := waitAuditRows(t, ctx, db, rid, 1)[0]
+		if row.Action != "message.sent" || row.Result != "failure" || row.ErrorCode != "recipient_not_accepting_messages" {
+			t.Fatalf("被拒发送的审计行不符（应留痕且带稳定码）：%+v", row)
+		}
+		if row.TargetType != "user" || row.TargetID != bob || !strings.Contains(row.Changes, "recipient_disallows_strangers") {
+			t.Fatalf("被拒发送的被动对象/摘要不符：%+v", row)
+		}
+		_, _ = db.ExecContext(ctx, "DELETE FROM audit.audit_log WHERE request_id=$1", rid)
+	} else {
+		t.Fatal("被拒的发送响应缺少 X-Request-Id：审计行无法定位")
+	}
+
+	// 4) 已有会话不受开关影响：alice 在第 2 步已经给 bob 发过信，她不是陌生人。
+	if w := send(alice, bob, "聊过的人仍能发"); w.Code != 200 {
+		t.Fatalf("已有会话的一方不该被开关拦住，实际 %d（%s）", w.Code, w.Body.String())
+	}
+
+	// 5) 重新打开：陌生人又能发；设置值是持久的（GET 回读）。
+	if got := setMessageSettings(t, router, token(bob), true); got != true {
+		t.Fatalf("重新打开应回 true，实际 %v", got)
+	}
+	if w := send(carol, bob, "重新打开后可以发"); w.Code != 200 {
+		t.Fatalf("重新打开后陌生人应能发，实际 %d（%s）", w.Code, w.Body.String())
+	}
+
+	// 6) 设置只写自己的：alice 关闭开关不能影响 bob 的值（请求里没有可以指向别人的输入）。
+	if got := setMessageSettings(t, router, token(alice), false); got != false {
+		t.Fatalf("alice 的设置应回 false，实际 %v", got)
+	}
+	if got := messageSettings(t, router, token(bob)); got != true {
+		t.Fatalf("别人的设置被改动了：bob = %v，期望仍是 true", got)
+	}
+
+	// 7) 设置项进审计：被动对象是设置所有者本人，changes 记前后值。
+	ridProbe := send(alice, bob, "审计探针")
+	if ridProbe.Code != 200 {
+		t.Fatalf("探针发送应 200，实际 %d（%s）", ridProbe.Code, ridProbe.Body.String())
+	}
+	putW := opsCall(t, router, http.MethodPut, "/api/messages/settings", `{"accept_from_strangers":false}`, token(dave))
+	if putW.Code != 200 {
+		t.Fatalf("PUT 设置应 200，实际 %d（%s）", putW.Code, putW.Body.String())
+	}
+	if rid := putW.Header().Get("X-Request-Id"); rid != "" {
+		row := waitAuditRows(t, ctx, db, rid, 1)[0]
+		if row.Action != "message.settings_updated" || row.TargetType != "user" || row.TargetID != dave {
+			t.Fatalf("设置项审计行不符：%+v", row)
+		}
+		for _, want := range []string{`"from": true`, `"to": false`} {
+			if !strings.Contains(row.Changes, want) {
+				t.Fatalf("设置审计 changes 缺少 %q：%s", want, row.Changes)
+			}
+		}
+		_, _ = db.ExecContext(ctx, "DELETE FROM audit.audit_log WHERE request_id=$1", rid)
+	} else {
+		t.Fatal("PUT 设置响应缺少 X-Request-Id：审计行无法定位")
+	}
+
+	// 8) 陌生人新会话额度：erin 连开 5 个新会话放行，第 6 个 429 rate_limited（额度是"新会话"，
+	//    不是"发信"——所以这里每个收件人都是全新的 uuid，且这一档与总体 20/分钟的桶互不串账）。
+	for i := 0; i < messageStrangerBurst; i++ {
+		peer := uuid.NewString()
+		t.Cleanup(func() { cleanupDirectMessages(ctx, db, peer) })
+		if w := send(erin, peer, fmt.Sprintf("新会话-%d", i)); w.Code != 200 {
+			t.Fatalf("第 %d 个新会话应放行，实际 %d（%s）", i+1, w.Code, w.Body.String())
+		}
+	}
+	sixth := uuid.NewString()
+	t.Cleanup(func() { cleanupDirectMessages(ctx, db, sixth) })
+	limited := send(erin, sixth, "第 6 个新会话")
+	if limited.Code != http.StatusTooManyRequests || opsErrorCode(t, limited) != "rate_limited" {
+		t.Fatalf("第 6 个新会话应 429 rate_limited，实际 %d（%s）", limited.Code, limited.Body.String())
+	}
+	if limited.Header().Get("Retry-After") == "" {
+		t.Fatal("429 必须带 Retry-After")
+	}
+	if n := pairRows(erin, sixth); n != 0 {
+		t.Fatalf("被限流的新会话不得落库，实际 %d 行", n)
+	}
+	if rid := limited.Header().Get("X-Request-Id"); rid != "" {
+		row := waitAuditRows(t, ctx, db, rid, 1)[0]
+		if row.ErrorCode != "rate_limited" || !strings.Contains(row.Changes, "new_stranger") {
+			t.Fatalf("被限流的新会话审计行应能区分是哪一档拦的：%+v", row)
+		}
+		_, _ = db.ExecContext(ctx, "DELETE FROM audit.audit_log WHERE request_id=$1", rid)
+	}
+
+	// 9) 陌生人额度只对"新会话"计费：erin 已经与前面 5 个人聊过，继续发不扣这一档，
+	//    因此即使额度已耗尽，她**继续**跟那 5 个人中的任意一个也能发出去（只受总体 20/分钟约束）。
+	var knownPeer string
+	if err := db.QueryRowContext(ctx, `SELECT recipient_id::text FROM community.direct_messages
+		WHERE sender_id=$1::uuid ORDER BY created_at LIMIT 1`, erin).Scan(&knownPeer); err != nil {
+		t.Fatalf("取 erin 的一个已有收件人: %v", err)
+	}
+	if w := send(erin, knownPeer, "额度耗尽后继续聊"); w.Code != 200 {
+		t.Fatalf("已有会话的继续发送不该被陌生人额度拦住，实际 %d（%s）", w.Code, w.Body.String())
+	}
+
+	// 10) 收件箱未读优先：frank 收到两条新消息（未读）与一条已被标记已读的旧会话，
+	//     未读的两段必须排在已读那段之前（组内仍按最近一条倒序）。
+	readPeer, unreadOld, unreadNew := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	t.Cleanup(func() { cleanupDirectMessages(ctx, db, readPeer, unreadOld, unreadNew) })
+	exec(t, ctx, db, `INSERT INTO community.direct_messages(id,sender_id,recipient_id,body,created_at,read_at)
+		VALUES($1,$2,$3,'已读会话',now() - make_interval(secs => 600), now())`,
+		uuid.NewString(), readPeer, frank)
+	exec(t, ctx, db, `INSERT INTO community.direct_messages(id,sender_id,recipient_id,body,created_at)
+		VALUES($1,$2,$3,'未读较早',now() - make_interval(secs => 300))`,
+		uuid.NewString(), unreadOld, frank)
+	exec(t, ctx, db, `INSERT INTO community.direct_messages(id,sender_id,recipient_id,body,created_at)
+		VALUES($1,$2,$3,'未读较新',now() - make_interval(secs => 60))`,
+		uuid.NewString(), unreadNew, frank)
+	convs, total := listConversations(t, router, token(frank), "")
+	if total != 3 || len(convs) != 3 {
+		t.Fatalf("frank 应有 3 段会话，实际 total=%d items=%d", total, len(convs))
+	}
+	if bodyOf(t, convs[0]) != "未读较新" || bodyOf(t, convs[1]) != "未读较早" || bodyOf(t, convs[2]) != "已读会话" {
+		t.Fatalf("未读优先排序不符：%q / %q / %q（期望 未读较新 / 未读较早 / 已读会话）",
+			bodyOf(t, convs[0]), bodyOf(t, convs[1]), bodyOf(t, convs[2]))
+	}
+
+	// 11) 未读优先没有改掉"每个分支走索引"的形状：关掉 seqscan 后两个分支仍各自命中收件箱/发件箱索引。
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开启事务: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+		t.Fatalf("关掉 seqscan: %v", err)
+	}
+	assertPlanUsesIndex(t, tx, "direct_messages_inbox", frank, `SELECT id FROM community.direct_messages
+		WHERE recipient_id = $1::uuid ORDER BY sender_id, created_at DESC, id DESC`)
+	assertPlanUsesIndex(t, tx, "direct_messages_outbox", frank, `SELECT id FROM community.direct_messages
+		WHERE sender_id = $1::uuid ORDER BY recipient_id, created_at DESC, id DESC`)
+}
+
+// messageSettings 读私信收件设置端点（扁平布尔）。
+func messageSettings(t *testing.T, router http.Handler, bearer string) bool {
+	t.Helper()
+	w := opsCall(t, router, http.MethodGet, "/api/messages/settings", "", bearer)
+	if w.Code != 200 {
+		t.Fatalf("GET 私信设置 HTTP %d：%s", w.Code, w.Body.String())
+	}
+	payload := struct {
+		Accept *bool `json:"accept_from_strangers"`
+	}{}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil || payload.Accept == nil {
+		t.Fatalf("设置响应应为 {\"accept_from_strangers\":bool}：%s", w.Body.String())
+	}
+	return *payload.Accept
+}
+
+// setMessageSettings 写私信收件设置并回读响应里的值。
+func setMessageSettings(t *testing.T, router http.Handler, bearer string, accept bool) bool {
+	t.Helper()
+	payload := fmt.Sprintf(`{"accept_from_strangers":%v}`, accept)
+	w := opsCall(t, router, http.MethodPut, "/api/messages/settings", payload, bearer)
+	if w.Code != 200 {
+		t.Fatalf("PUT 私信设置 HTTP %d：%s", w.Code, w.Body.String())
+	}
+	out := struct {
+		Accept *bool `json:"accept_from_strangers"`
+	}{}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || out.Accept == nil {
+		t.Fatalf("设置写入响应应为 {\"accept_from_strangers\":bool}：%s", w.Body.String())
+	}
+	return *out.Accept
+}

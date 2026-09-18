@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"time"
 )
 
@@ -17,6 +19,10 @@ type DirectMessage struct {
 }
 
 // Conversation 是收件箱里的一行：对方 id + 最近一条消息 + 我未读的条数。
+//
+// **排序是"未读优先、组内按最近一条倒序"**：有未读的会话排在最前（收件箱的首要用途是
+// "还有谁在等我回"），组内仍按 last_message.created_at DESC, id DESC。
+// 这条排序多了一个"未读"这个可变键，已知影响写在 ListConversations 的注释里。
 //
 // 不含对方用户名：账号资料归账号服务，本服务不查它的库（与 000005 的归属边界一致）。
 // 让每一行都做一次出站调用去补用户名，等于把收件箱变成"账号服务可用才可用"，
@@ -102,6 +108,13 @@ func (s *Store) ListConversation(ctx context.Context, userID, peerID string, lim
 // 为什么不用窗口函数 row_number() 一把梭：那要把两个分支的结果全部物化再排序，
 // 而这里每个分支的排序都由索引直接给出，成本与"我参与的会话数"同阶。
 //
+// **排序是"未读优先"**：ORDER BY (未读数 > 0) DESC, created_at DESC, id DESC。它的成本只加在
+// 最后那次"对已归并的会话行排序"上（每个会话至多两行归并成一行），两个分支的索引倒序扫描
+// 与"每个对方取最近一条"的查询形状都没变；真库用例在 enable_seqscan=off 下继续断言两个分支
+// 命中 direct_messages_inbox / direct_messages_outbox（计划对比见 docs-local 报告）。
+// 已知影响：未读是**可变**排序键，配合 OFFSET 分页时"读到一半把上面的会话标记成已读"会让它
+// 往后挪，翻页可能重复或跳过一行——与所有"排序键可变 + 偏移分页"的列表同理，本次接受。
+//
 // total 单独一条查询：`count(*) OVER ()` 在"页码越界、这一页为空"时拿不到总数
 // （窗口函数没有行就没有输出），而调用方要靠 total 判断"还有没有下一页"。
 func (s *Store) ListConversations(ctx context.Context, userID string, limit, offset int) ([]Conversation, int, error) {
@@ -135,7 +148,7 @@ func (s *Store) ListConversations(ctx context.Context, userID string, limit, off
 		SELECT l.peer::text, l.id::text, l.sender_id::text, l.recipient_id::text, l.body, l.created_at,
 		       COALESCE(u.n, 0)
 		  FROM latest l LEFT JOIN unread u ON u.peer = l.peer
-		 ORDER BY l.created_at DESC, l.id DESC
+		 ORDER BY (COALESCE(u.n, 0) > 0) DESC, l.created_at DESC, l.id DESC
 		 LIMIT $2 OFFSET $3`,
 		userID, limit, offset)
 	if err != nil {
@@ -195,4 +208,59 @@ func (s *Store) MarkConversationRead(ctx context.Context, userID, peerID string)
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// MessagePolicy 是发信前的两个判定，一次往返取回：收件人是否接收陌生人私信、这一对之间是否已有会话。
+//
+// 为什么合并成一条查询：发信是热路径，而这两个判定都只跟"收件人"与"这一对"有关，
+// 分成两次往返只会多一次网络等待。第二条用的是既有的 direct_messages_conversation 索引
+// （EXISTS + LIMIT 语义：找到第一行就停），不需要为它新建索引。
+type MessagePolicy struct {
+	// AcceptsFromStrangers 是收件人的开关。**没有设置行 = 默认接收**（见 000010 迁移的理由）。
+	AcceptsFromStrangers bool
+	// HasConversation 为真表示这一对之间已经有过私信（任一方向），因此发送者不是"陌生人"。
+	HasConversation bool
+}
+
+// SendPolicy 取发信前的判定。收件人 id 只当外部引用（不查账号库），因此不存在的用户
+// 与"没设置过的用户"都是默认接收——本服务无法区分二者，也不该假装能区分。
+func (s *Store) SendPolicy(ctx context.Context, senderID, recipientID string) (MessagePolicy, error) {
+	var p MessagePolicy
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE((SELECT accept_from_strangers
+		                   FROM community.direct_message_settings
+		                  WHERE user_id = $2::uuid), true),
+		       EXISTS (SELECT 1 FROM community.direct_messages
+		                WHERE LEAST(sender_id,recipient_id)=LEAST($1::uuid,$2::uuid)
+		                  AND GREATEST(sender_id,recipient_id)=GREATEST($1::uuid,$2::uuid))`,
+		senderID, recipientID).Scan(&p.AcceptsFromStrangers, &p.HasConversation)
+	return p, err
+}
+
+// MessageSettings 读我自己的收件设置。没有行即默认接收（true）：默认值不落库，
+// 因此"用户从没进过设置页"与"用户明确选了接收"在库里是同一种状态，这是刻意的——
+// 默认值改了（例如将来改成"只接收既有会话"）时，不会有存量行把旧默认冻结住。
+func (s *Store) MessageSettings(ctx context.Context, userID string) (bool, error) {
+	var accept bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT accept_from_strangers FROM community.direct_message_settings WHERE user_id = $1::uuid`,
+		userID).Scan(&accept)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	return accept, err
+}
+
+// SetMessageSettings 写我自己的收件设置（UPSERT：首次写入建行，之后改值并刷新 updated_at）。
+// 只写自己的行：user_id 恒为当前用户，请求里没有可以指向别人的输入。
+func (s *Store) SetMessageSettings(ctx context.Context, userID string, accept bool) (bool, error) {
+	var out bool
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO community.direct_message_settings(user_id, accept_from_strangers)
+		VALUES($1::uuid, $2)
+		ON CONFLICT (user_id) DO UPDATE
+		   SET accept_from_strangers = EXCLUDED.accept_from_strangers,
+		       updated_at = now()
+		RETURNING accept_from_strangers`, userID, accept).Scan(&out)
+	return out, err
 }

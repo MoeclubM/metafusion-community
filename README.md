@@ -47,10 +47,12 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 | GET | `/api/users/{id}/favorites` | 匿名 | 指定用户的收藏列表（公开读，目标按可见性过滤） |
 | GET | `/api/users/{id}/stats` | 匿名 | 用户互动统计（主题 / 楼中回复 / 收藏），`{"stats":{…}}`；口径见「用户互动统计」 |
 | GET | `/api/messages/with/{id}` | 登录 | 与某人的私信会话（`page`/`page_size`，缺省 20、上限 100，按时间**倒序**）；`{"items":[{id,sender_id,recipient_id,body,created_at}],"total":N}` |
-| POST | `/api/messages/with/{id}` | 登录 | 发私信（`{"body":"…"}`；裁剪两侧空白后必须非空、不超过 4000 **字符**，否则 400 `invalid_body`；给自己发 400 `invalid_recipient`；超过发送频率 429 `rate_limited`）→ `{"message":{…}}` |
-| GET | `/api/messages/conversations` | 登录 | 收件箱会话列表（按对方分组，`page`/`page_size` 与其它列表同口径，按最近一条**倒序**）；`{"items":[{peer_id,last_message,unread_count}],"total":N}`；口径见「私信（DM）」 |
+| POST | `/api/messages/with/{id}` | 登录 | 发私信（`{"body":"…"}`；裁剪两侧空白后必须非空、不超过 4000 **字符**，否则 400 `invalid_body`；给自己发 400 `invalid_recipient`；对方不收陌生人私信 403 `recipient_not_accepting_messages`；超过总体频率或陌生人新会话额度 429 `rate_limited`）→ `{"message":{…}}` |
+| GET | `/api/messages/conversations` | 登录 | 收件箱会话列表（按对方分组，`page`/`page_size` 与其它列表同口径，**未读优先、组内按最近一条倒序**）；`{"items":[{peer_id,last_message,unread_count}],"total":N}`；口径见「私信（DM）」 |
 | GET | `/api/messages/unread` | 登录 | 我的未读总数（导航栏角标）；`{"unread_count":N}`，与收件箱每行的 `unread_count` 同口径 |
 | PUT | `/api/messages/with/{id}/read` | 登录 | 标记"对方发给我"的未读为已读 → `{"marked":N}`（幂等：重复调用为 0，且不刷新回执时间） |
+| GET | `/api/messages/settings` | 登录 | 我的私信收件设置 → `{"accept_from_strangers":bool}`（没有设置行 = 默认 true） |
+| PUT | `/api/messages/settings` | 登录 | 改我的私信收件设置（`{"accept_from_strangers":bool}`，字段缺失 400 `invalid_payload`）→ 同形状回读；进审计（`message.settings_updated`） |
 
 论坛主题与"实体短评"共用同一张 `community.topics`，靠板块区分语义：评论锚定实体、无独立标题、不进信息流；
 主题有标题、可独立成文、进信息流（`show_in_feed`）。
@@ -103,7 +105,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 前端 `DirectMessageModal`（用户主页弹窗）与主站 `/messages` 收件箱页读的是同一批端点：
 单会话 `/api/messages/with/{id}`、收件箱 `/api/messages/conversations`、未读 `/api/messages/unread`、
-标记已读 `PUT /api/messages/with/{id}/read`。
+标记已读 `PUT /api/messages/with/{id}/read`、收件设置 `GET|PUT /api/messages/settings`（主站设置页的"接收陌生人私信"开关）。
 
 - **可见性是查询结构保证的**：会话由 `(当前用户, 对方)` 一对参与者决定，SQL 用
   `LEAST/GREATEST` 归一后等值匹配（与 `direct_messages_conversation` 索引表达式逐字一致），
@@ -123,16 +125,47 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 - **未读数只有一套口径**：`recipient_id = 我 AND read_at IS NULL`（000009 的索引服务它），
   收件箱每行的 `unread_count` 与 `GET /api/messages/unread` 都是它；自己发出的消息从不计入。
 - **分页窗口**：单会话第一页是**最近**的 20 条（按 `created_at DESC, id DESC`），往后翻是更早的，
-  `total` 是整段会话的条数、不随窗口变化；收件箱同样倒序（按最近一条），`total` 是"我参与了多少段会话"，
-  **页码越界时该页为空但 `total` 仍正确**（前端靠它判断还有没有下一页）。
+  `total` 是整段会话的条数、不随窗口变化；收件箱是**未读优先**（有未读的会话在最前）、组内按最近一条倒序，
+  `total` 是"我参与了多少段会话"，**页码越界时该页为空但 `total` 仍正确**（前端靠它判断还有没有下一页）。
+  `"未读"是可变排序键`：配合 OFFSET 分页时，读到一半把上面的会话标记成已读会让它往后挪，翻页可能重复或跳过一行
+  ——与所有"排序键可变 + 偏移分页"的列表同理，本次接受（要彻底解决得换游标分页）。
 - **收件箱列表是两条查询，不是 N+1**：000009 的两条索引分别服务"我收到的按对方取最近一条"与
   "我发出的按对方取最近一条"，两个分支都是索引倒序扫描（`DISTINCT ON` 的排序键与索引列顺序逐字对齐），
   未读由一次 `GROUP BY sender_id` 出全部会话；真库用例在 `enable_seqscan=off` 下断言命中的正是这两条索引。
-- **反骚扰只做到"发送频率"这一层**：网关按 IP 限流（30r/s）拦不住"一个账号刷量"，因此发信另有一条
-  **按账号**的令牌桶（容量 20、每分钟回满，见 `internal/handler/message_limit.go`），超限回 429 `rate_limited`
-  + `Retry-After`。已知边界：桶在进程内存里（多副本时额度按副本数放大，要跨副本一致得上共享存储）；
-  只限"发多快"、不限"发给谁"。**拉黑 / 举报 / 静默期仍不存在**（留给 F3）——本服务目前没有任何
-  收件人侧设置，也没有可以阻断投递的名单。
+- **收件人侧的"接收陌生人私信"开关**（迁移 `000010`，表 `community.direct_message_settings`）：
+  只有 `user_id`、`accept_from_strangers`、`updated_at` 三列，**没有行 = 默认接收**（true）。
+  - **"陌生人"的定义**：平台没有关注/好友关系，所以给了一个可判定的口径——**这一对用户之间还没有任何私信**
+    （双向都不存在）。因此关闭开关的效果是"只接收已经聊过的人的私信"，**不会掐断任何既有对话**。
+  - **默认为什么是"接收"**：新功能一上线不能让既有用户突然发不出信，平台也没有"先成为好友"的路径可走；
+    滥用面交给发送侧的陌生人额度（见下）与收件人自己的开关一起收窄。反过来如果默认"只接收既有会话"，
+    一个刚注册的人将永远收不到第一条私信——那等于把私信功能对新用户关掉。
+  - **拒收不是静默丢弃**：陌生人发信拿到 `403 recipient_not_accepting_messages`（稳定机器码，前端有对应文案），
+    审计行留痕（`message.sent` + `result=failure`，changes 里 `rejected=recipient_disallows_strangers`），
+    且**不落库**。"对方拒收"必须是发送方能看到的事实，不能表现成"发出去了但其实没到"。
+  - **设置只写自己的**：`PUT` 的 `user_id` 恒为当前用户（请求里没有可以指向别人的输入）；
+    改动进审计 `message.settings_updated`，changes 记 `accept_from_strangers` 的前后值。
+- **反骚扰：两档按账号限流**（`internal/handler/message_limit.go`）。网关按 IP 限流（30r/s）拦不住"一个账号刷量"，
+  所以发信另有两档，**两档是交集**（谁先耗尽谁拦），超限都是 429 `rate_limited` + `Retry-After`：
+
+  | 档 | 计费对象 | 额度 | 审计 changes |
+  | --- | --- | --- | --- |
+  | 总体发送频率 | 该账号的**全部**发信 | 20 条 / 分钟 | `limit=sender_window` |
+  | 陌生人新会话 | 只对"向**没有既有会话**的人发起新会话" | 5 个 / 小时 | `limit=new_stranger` |
+
+  第二档存在的前提就是上面的"默认接收"：没有它，任何人都能给任意 uuid 刷信。**已有会话的一方不扣这一档**，
+  所以"继续聊"永远不会被它拦住（只会受第一档约束）。
+  **拉黑 / 举报 / 静默期仍不存在**（举报与申诉由 F3 那批承担；拉黑需要收件人侧的名单，本服务还没有）。
+
+### 扩容前置项：两档限流在**单实例**假设上
+
+限流桶在**进程内存**里：多副本部署时每个副本各有一份，实际放行量 = 额度 × 副本数。
+**当前线上是单副本，因此行为正确**；但它意味着"加副本"会**静默放大限流额度**（20 条/分钟 × N、5 个新会话/小时 × N）——
+这是隐性安全退化，不是性能优化。因此：
+
+- **扩到多副本之前必须先解决这一条**（三选一，并写明选了哪个）：把桶换到共享存储（本服务目前不接 Redis，
+  需要先接）；或在网关/编排层把"按账号限流"挪到唯一入口上；或按副本数折算额度并写明折算口径。
+- 同一原因，本服务目前**没有**别的跨实例共享的可变状态（审计各写各的库、会话数据在 PG），
+  所以除了限流额度之外没有第二处"多副本会失真"的量；这条前置项是唯一的一处。
 
 ### 帖子治理列表
 

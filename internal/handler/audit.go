@@ -26,6 +26,7 @@ import (
 //	POST   /api/favorites/toggle                     favorite.toggled  收藏切换
 //	POST   /api/messages/with/:id                    message.sent      发私信
 //	PUT    /api/messages/with/:id/read                message.read      标记会话已读
+//	PUT    /api/messages/settings                     message.settings_updated 收件人侧的私信开关
 //	POST   /api/community/reports                      report.created    提交举报
 //	POST   /api/community/reports/:id/appeal           report_appeal.created 被处置方提交申诉
 //	POST   /api/community/admin/reports/:id/accept     report.accepted   受理举报
@@ -36,8 +37,14 @@ import (
 // 举报与申诉分两个域（report.* / report_appeal.*）：它们各有一条队列、各自的状态机，
 // 合成一个域会让"按动作码聚合"时分不清处理的是举报还是申诉。
 //
-// 收件箱的两条读接口（GET /api/messages/conversations、GET /api/messages/unread）是**纯读**：
-// 不置位 read_at（已读由收信人显式标记，走上面那条 PUT），因此按契约 §7「审计只记写操作」不进注册表。
+// 收件箱的两条读接口（GET /api/messages/conversations、GET /api/messages/unread）与读设置
+// （GET /api/messages/settings）是**纯读**：不置位 read_at（已读由收信人显式标记，走上面那条 PUT），
+// 因此按契约 §7「审计只记写操作」不进注册表。
+//
+// 私信的**被拒发送**也要留痕，但它们走的是已登记的路由：POST /api/messages/with/:id 无论成功、
+// 被收件人开关拒收（403 recipient_not_accepting_messages）还是被两档限流拦住（429 rate_limited），
+// 都落在 message.sent 这一条动作码下，靠 result/error_code（以及 changes 里的 limit/rejected）区分——
+// 给"同一条路由的不同结局"各登记一个动作码会让路由与动作码变成多对多，覆盖守卫也就没法用了。
 //
 // 两条"看起来像漏登记"的事实，都不是漏：
 //   - DELETE /api/community/topics/:id **不排除评论板块**（存量评论行就存在 community.topics 里），
@@ -77,6 +84,7 @@ var auditActions = map[string]string{
 	"POST /api/favorites/toggle":                     "favorite.toggled",
 	"POST /api/messages/with/:id":                    "message.sent",
 	"PUT /api/messages/with/:id/read":                "message.read",
+	"PUT /api/messages/settings":                     "message.settings_updated",
 	"POST /api/community/reports":                    "report.created",
 	"POST /api/community/reports/:id/appeal":         "report_appeal.created",
 	"POST /api/community/admin/reports/:id/accept":   "report.accepted",

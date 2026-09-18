@@ -40,6 +40,7 @@ var frozenRoutes = []string{
 	"GET /api/favorites/mine",
 	"GET /api/favorites/status",
 	"GET /api/messages/conversations",
+	"GET /api/messages/settings",
 	"GET /api/messages/unread",
 	"GET /api/messages/with/:id",
 	"GET /api/users/:id/favorites",
@@ -57,6 +58,7 @@ var frozenRoutes = []string{
 	"POST /api/messages/with/:id",
 	"PUT /api/community/boards/:code",
 	"PUT /api/community/topics/:id/pin",
+	"PUT /api/messages/settings",
 	"PUT /api/messages/with/:id/read",
 }
 
