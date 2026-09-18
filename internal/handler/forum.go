@@ -673,6 +673,8 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			changes["reply_to_post_number"] = *replyTo
 		}
 		audit.Describe(c, audit.Detail{TargetType: "post", TargetID: pid, Changes: changes})
+		// 回帖的通知是旁路（见 notifications.go）：收件人 = 被回复楼层作者 → 主题作者。
+		h.notifyTopicReply(c, topicID, pid, replyTo, content)
 		c.JSON(200, gin.H{
 			"id": pid, "topic_id": topicID, "user_id": p.ID, "author_name": authorName(p),
 			"content": content, "post_number": next, "reply_to_post_number": replyTo,

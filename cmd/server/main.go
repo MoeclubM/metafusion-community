@@ -54,6 +54,14 @@ func main() {
 	}
 
 	cat := catalog.New(cfg.CatalogURL, cfg.CatalogTimeout)
+	// 站内通知的投递密钥（目录侧 INTERNAL_API_TOKEN）。未配置时通知不发但评论照常成功：
+	// 启动日志必须说清是哪一种状态，否则"通知为什么没来"只能靠读源码猜。
+	cat.SetInternalToken(cfg.InternalAPIToken)
+	if cat.NotificationsConfigured() {
+		log.Print("cross-service notification delivery is enabled (POST " + cfg.CatalogURL + "/api/notifications/internal)")
+	} else {
+		log.Print("INTERNAL_API_TOKEN is not configured: comment replies will not produce in-app notifications")
+	}
 	verifier, err := auth.New(cfg)
 	if err != nil {
 		log.Fatalf("token verifier initialization failed: %v", err)

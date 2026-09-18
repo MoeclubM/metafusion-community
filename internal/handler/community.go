@@ -171,6 +171,9 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 		}
 		// 短评正文不进审计（与发主题同一口径：审计表不存请求体原文），只记它锚定哪个条目。
 		audit.Describe(c, audit.Detail{TargetType: "comment", TargetID: pid, Changes: map[string]any{"entity_id": id}})
+		// 通知是同一次请求内的旁路步骤：投递失败只记日志，不改这次短评的结果
+		//（收件人解析、扇出上界与批预算见 notifications.go）。
+		h.notifyEntityComment(c, id, pid, in.Body)
 		c.JSON(200, gin.H{
 			"ok": true,
 			"item": map[string]any{

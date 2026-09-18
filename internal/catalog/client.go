@@ -51,6 +51,13 @@ func catalogPolicy() upstream.Policy {
 type Client struct {
 	base string
 	up   *upstream.Client
+	// notify 是**投递站内通知**专用的执行器（策略见 notify.go）：它与读路径共用地址、
+	// 但超时与重试预算更短（挂在回帖请求尾巴上，不该把真人等待的写请求拖长），
+	// 因此各自一个 upstream.Client——熔断器与连接池也各自一套，互不影响。
+	notify *upstream.Client
+	// internalToken 是目录侧跨服务投递的共享密钥（INTERNAL_API_TOKEN）。
+	// 为空即"未配置"：通知不发，评论照常成功（见 notify.go 的 Configured/ErrNotConfigured）。
+	internalToken string
 }
 
 // New 建目录客户端。budgetFloor 是运维给的总预算下限（COMMUNITY_CATALOG_TIMEOUT_MS）：
@@ -66,7 +73,7 @@ func New(base string, budgetFloor time.Duration) *Client {
 
 // newClient 允许注入执行器：测试要断言"重试有界""熔断打开"不能靠真等 2s 的单次超时。
 func newClient(base string, up *upstream.Client) *Client {
-	return &Client{base: strings.TrimRight(base, "/"), up: up}
+	return &Client{base: strings.TrimRight(base, "/"), up: up, notify: upstream.New(notifyPolicy())}
 }
 
 // Upstream 返回出站执行器：/ready?deep=1 的深探针与请求路径共用它——

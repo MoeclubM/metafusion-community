@@ -29,6 +29,10 @@ type Config struct {
 	CatalogURL string
 	// CatalogTimeout 单次目录调用的超时。
 	CatalogTimeout time.Duration
+	// InternalAPIToken 是"跨服务投递站内通知"的共享密钥（目录侧同名变量 INTERNAL_API_TOKEN）。
+	// 留空 = 通知投递关闭：评论/回帖照常成功，只是不产生通知（部署态，不是故障）。
+	// 它只用于 POST /api/notifications/internal，不进日志、不出现在任何响应里。
+	InternalAPIToken string
 	// TrustedProxies 是应用层信任的反向代理范围（TRUSTED_PROXIES，逗号分隔的 IP/CIDR）。
 	// 留空 = 只信回环 + RFC1918 私网（网关容器所在网段），none = 入口链上没有代理。
 	// 解析与生效在启动时由 nettrust.Apply 完成：非法项直接拒绝启动，不退化成"谁都不信"
@@ -38,16 +42,17 @@ type Config struct {
 
 func Load() Config {
 	c := Config{
-		Port:            env("PORT", "8083"),
-		DatabaseURL:     env("DATABASE_URL", ""),
-		JWKSURL:         env("COMMUNITY_JWKS_URL", "http://auth:8081/api/oidc/jwks"),
-		JWTPublicKeyPEM: env("AUTH_JWT_PUBLIC_KEY", ""),
-		JWTIssuer:       env("AUTH_JWT_ISSUER", "https://findverse.cc/api"),
-		JWTAudience:     env("AUTH_JWT_AUDIENCE", "metafusion"),
-		AuthURL:         env("AUTH_URL", ""),
-		CatalogURL:      env("CATALOG_URL", "http://backend:8080"),
-		CatalogTimeout:  time.Duration(envInt("COMMUNITY_CATALOG_TIMEOUT_MS", 5000)) * time.Millisecond,
-		TrustedProxies:  env(nettrust.EnvVar, ""), // TRUSTED_PROXIES：留空即 nettrust 的保守默认
+		Port:             env("PORT", "8083"),
+		DatabaseURL:      env("DATABASE_URL", ""),
+		JWKSURL:          env("COMMUNITY_JWKS_URL", "http://auth:8081/api/oidc/jwks"),
+		JWTPublicKeyPEM:  env("AUTH_JWT_PUBLIC_KEY", ""),
+		JWTIssuer:        env("AUTH_JWT_ISSUER", "https://findverse.cc/api"),
+		JWTAudience:      env("AUTH_JWT_AUDIENCE", "metafusion"),
+		AuthURL:          env("AUTH_URL", ""),
+		CatalogURL:       env("CATALOG_URL", "http://backend:8080"),
+		CatalogTimeout:   time.Duration(envInt("COMMUNITY_CATALOG_TIMEOUT_MS", 5000)) * time.Millisecond,
+		InternalAPIToken: strings.TrimSpace(os.Getenv("INTERNAL_API_TOKEN")),
+		TrustedProxies:   env(nettrust.EnvVar, ""), // TRUSTED_PROXIES：留空即 nettrust 的保守默认
 	}
 	if c.DatabaseURL == "" {
 		c.DatabaseURL = buildDSN()
