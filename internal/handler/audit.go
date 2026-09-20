@@ -33,6 +33,7 @@ import (
 //	POST   /api/community/admin/reports/:id/reject     report.rejected   驳回举报
 //	POST   /api/community/admin/reports/:id/resolve    report.resolved   处置举报（记录处置结论）
 //	POST   /api/community/admin/appeals/:id/review    report_appeal.reviewed 处理申诉
+//	POST   /api/community/admin/notifications/outbox/retry notification.retried 触发必须送达通知的到期重试
 //
 // 举报与申诉分两个域（report.* / report_appeal.*）：它们各有一条队列、各自的状态机，
 // 合成一个域会让"按动作码聚合"时分不清处理的是举报还是申诉。
@@ -91,6 +92,7 @@ var auditActions = map[string]string{
 	"POST /api/community/admin/reports/:id/reject":   "report.rejected",
 	"POST /api/community/admin/reports/:id/resolve":  "report.resolved",
 	"POST /api/community/admin/appeals/:id/review":   "report_appeal.reviewed",
+	"POST /api/community/admin/notifications/outbox/retry": "notification.retried",
 }
 
 // auditExempt 是写路由的豁免表（路由模板 → 一句理由）。当前**为空**：本服务的 10 条写路由全部

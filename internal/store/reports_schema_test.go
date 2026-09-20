@@ -21,10 +21,11 @@ func TestReportWordListsMatchMigrationChecks(t *testing.T) {
 	}{
 		{"target_type", [][]string{ReportTargetTypes}},
 		{"reason", [][]string{ReportReasons}},
-		// status 出现在两张表里，两份词表各不相同：先收齐再按集合比对。
+		// status 出现在三张表里，三份词表各不相同：先收齐再按集合比对。
 		{"status", [][]string{
 			{ReportPending, ReportAccepted, ReportRejected, ReportResolved},
 			{AppealPending, AppealAccepted, AppealRejected},
+			{OutboxPending, OutboxSent, OutboxFailed, OutboxExpired},
 		}},
 		{"enforcement", [][]string{{"", EnforcementContentRemoved, EnforcementUserBanned, EnforcementNone}}},
 	}

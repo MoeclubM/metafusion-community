@@ -140,6 +140,25 @@ var frozenOwnTableDefs = map[string]map[string]string{
 		"reviewed_at":    "reviewed_at timestamptz",
 		"created_at":     "created_at timestamptz not null default now()",
 	},
+	// 必须送达通知的待投递表（000011，X02）：event_id 唯一做幂等，状态机 pending→sent/
+	// failed/expired，过期与次数耗尽不再自动重试（由管理端查询与重放）。
+	"community.notification_outbox": {
+		"id":            "id uuid primary key",
+		"recipient_id":  "recipient_id uuid not null",
+		"type":          "type text not null",
+		"subject_type":  "subject_type text not null",
+		"subject_id":    "subject_id text not null",
+		"dedupe_key":    "dedupe_key text not null",
+		"event_id":      "event_id text not null unique",
+		"payload":       "payload jsonb not null default '{}'::jsonb",
+		"status":        "status text not null default 'pending' check(status in ('pending','sent','failed','expired'))",
+		"attempts":      "attempts int not null default 0",
+		"next_retry_at": "next_retry_at timestamptz not null default now()",
+		"expires_at":    "expires_at timestamptz not null",
+		"last_error":    "last_error text not null default ''",
+		"created_at":    "created_at timestamptz not null default now()",
+		"updated_at":    "updated_at timestamptz not null default now()",
+	},
 }
 
 // frozenOwnIndexes 是自有表上必须存在的索引：表达式与排序方向逐字冻结。
@@ -161,6 +180,9 @@ var frozenOwnIndexes = map[string]string{
 	"reports_reporter":             "community.reports (reporter_id, created_at desc)",
 	"report_events_report":         "community.report_events (report_id, at, id)",
 	"report_appeals_queue":         "community.report_appeals (status, created_at desc, id desc)",
+	"notification_outbox_due":        "community.notification_outbox (status, next_retry_at, id)",
+	"notification_outbox_recipient":  "community.notification_outbox (recipient_id, created_at desc, id desc)",
+	"notification_outbox_dedupe":     "community.notification_outbox (dedupe_key)",
 }
 
 var (

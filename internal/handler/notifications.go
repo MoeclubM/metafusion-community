@@ -14,6 +14,11 @@ package handler
 // 投递是旁路：写请求已经提交，通知发不出去只记日志（与审计旁路同一哲学）。
 // 扇出有上界（participantFanout）且整批共享一个 deadline（notifyBudget）：
 // 热门条目不该让一次评论变成 20 次串行跨服务调用，真人等的还是那个 POST。
+//
+// X02 边界：以上是尽力投递（best-effort，comment.replied）——迟到的提醒没有价值。
+// 审核/安全/处置类必须送达的通知走 community.notification_outbox（见
+// notifications_outbox.go）：先落库（event_id 幂等），再由重试器投递到目录收件箱，
+// 退避/过期/失败查询齐备。不引入 Kafka：量级与语义用本库表即够。
 
 import (
 	"context"
