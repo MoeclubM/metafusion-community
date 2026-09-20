@@ -293,11 +293,14 @@ func TestPATPrincipalNeverFallsBackToRole(t *testing.T) {
 			t.Fatalf("HasPermission 对空权限的 PAT 不该放行 %s", code)
 		}
 	}
-	// 对照：同角色的**老令牌**（没有 permissions 声明、不是 PAT）仍按历史角色兜底——
-	// 这条差异是有意的，不能顺手把老令牌也收紧。
+	// 对照：同角色的**老令牌**（缺 permissions 键、非 PAT、非第三方）仅保留发帖历史边界——
+	// S01 起治理码不再设 admin 兜底（显式空与缺键的老令牌在治理码上一致拒绝）。
 	legacy := &Principal{ID: "u-2", Role: "admin"}
-	if !legacy.Can(PermissionPostModerate) {
-		t.Fatal("老令牌的 admin 角色兜底必须保持")
+	if !legacy.Can(PermissionPostCreate) {
+		t.Fatal("老令牌仍可发帖：收口前发帖只要求登录")
+	}
+	if legacy.Can(PermissionPostModerate) {
+		t.Fatal("S01 起老令牌的 admin 也不得凭角色放行治理码")
 	}
 	if legacy.HasPermission(PermissionPostModerate) {
 		t.Fatal("HasPermission 不对任何角色兜底：老令牌也不该在空 permissions 上放行")

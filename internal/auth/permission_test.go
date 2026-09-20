@@ -48,13 +48,16 @@ func TestCanHonoursWildcard(t *testing.T) {
 	}
 }
 
-// 兼容：老令牌（没有 permissions 声明）与尚未按权限组配置的实例按历史边界兜底 ——
-// 治理类码只认 admin；发帖码是收口前的"登录即可"，非 admin 角色仍可发（见 legacyOpenCodes）。
+// 兼容：老令牌（缺 permissions 键、非第三方、非 PAT）仅保留发帖历史边界（S01 已关闭 admin 兜底）。
+// S01 起治理码不再设 admin 兜底；发帖码是收口前的“登录即可”，非 admin 角色仍可发（见 legacyOpenCodes）。
 func TestCanFallsBackToRoleForLegacyTokens(t *testing.T) {
 	legacyAdmin := &Principal{ID: "u-5", Username: "kana", Role: "admin"}
-	for _, code := range communityPermissionCodes {
-		if !legacyAdmin.Can(code) {
-			t.Fatalf("老令牌的 admin 应放行本服务全部码，%s 未放行", code)
+	if !legacyAdmin.Can(PermissionPostCreate) {
+		t.Fatal("老令牌仍可发帖：收口前发帖只要求登录")
+	}
+	for _, code := range []string{PermissionPostModerate, PermissionTopicPin, PermissionBoardManage, PermissionReportReview} {
+		if legacyAdmin.Can(code) {
+			t.Fatalf("S01 起老令牌的 admin 也不得凭角色放行治理码 %s", code)
 		}
 	}
 	// 角色兜底只覆盖本服务声明的码，别的子系统的码不归论坛判。
@@ -81,5 +84,44 @@ func TestCanFallsBackToRoleForLegacyTokens(t *testing.T) {
 	var anon *Principal
 	if anon.Can(PermissionPostCreate) || anon.Can(PermissionPostModerate) {
 		t.Fatal("匿名（nil）不得放行")
+	}
+}
+
+// S01：显式空权限（含空数组、PermissionsSet）不得回落 admin，即使角色是 admin。
+func TestCanDeniesExplicitEmptyAdmin(t *testing.T) {
+	explicitEmpty := &Principal{ID: "u-8", Role: "admin", Permissions: []string{}, PermissionsSet: true}
+	for _, code := range communityPermissionCodes {
+		if explicitEmpty.Can(code) {
+			t.Fatalf("显式空权限不得回落 admin：%s 不该放行", code)
+		}
+	}
+	nonNilEmpty := &Principal{ID: "u-9", Role: "admin", Permissions: []string{}}
+	for _, code := range []string{PermissionPostModerate, PermissionTopicPin, PermissionBoardManage, PermissionReportReview} {
+		if nonNilEmpty.Can(code) {
+			t.Fatalf("非 nil 空集合不得回落 admin：%s 不该放行", code)
+		}
+	}
+}
+
+// S01：第三方 OAuth 身份在治理码上直接不放行；发帖码仍以码为准（空即不放行）。
+func TestCanDeniesThirdPartyGovernance(t *testing.T) {
+	thirdPartyAdmin := &Principal{
+		ID: "u-10", Role: "admin", Groups: []string{"admin"}, Permissions: []string{"*"},
+		Scope: "openid profile", ClientID: "third-party-app", IsThirdParty: true, PermissionsSet: true,
+	}
+	for _, code := range []string{PermissionPostModerate, PermissionTopicPin, PermissionBoardManage, PermissionReportReview} {
+		if thirdPartyAdmin.Can(code) {
+			t.Fatalf("第三方令牌不得放行治理码 %s：即使带 * 通配", code)
+		}
+	}
+	thirdPartyPoster := &Principal{
+		ID: "u-11", Role: "user", Permissions: []string{PermissionPostCreate},
+		Scope: "profile", ClientID: "third-party-app", IsThirdParty: true, PermissionsSet: true,
+	}
+	if !thirdPartyPoster.Can(PermissionPostCreate) {
+		t.Fatal("第三方令牌的发帖码仍以码为准：持有即放行")
+	}
+	if thirdPartyPoster.Can(PermissionPostModerate) {
+		t.Fatal("第三方令牌未持有治理码不得放行")
 	}
 }

@@ -95,12 +95,20 @@ func (h *Handler) guard(write bool) gin.HandlerFunc {
 // require 是"已登录 + 持有权限码"的门槛：匿名 401 authentication_required（与 guard 同一口径），
 // 已登录但缺码 403 forbidden。身份由组上的 Middleware 预解析，这里不重复解析令牌。
 // 判定放在中间件而不是处理器里：缺码的请求不该进入业务逻辑（更不该先读一次库再看权限）。
+//
+// S01：第三方 OAuth 令牌（IsThirdParty）在治理码上直接 403（管理 API 默认拒绝第三方，
+// 与 Principal.Can 的双重收口）：即使签发侧未来把某治理码写进第三方令牌，本服务仍拒。
 func (h *Handler) require(code string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		p := h.principal(c)
 		if p == nil {
 			audit.Fail(c, "authentication_required")
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authentication_required"})
+			return
+		}
+		if p.IsThirdParty && code != auth.PermissionPostCreate {
+			fail(c, http.StatusForbidden, "forbidden")
+			c.Abort()
 			return
 		}
 		if !p.Can(code) {

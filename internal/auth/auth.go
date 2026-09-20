@@ -32,6 +32,16 @@ type Principal struct {
 	// （令牌 claims 与 /api/auth/me 都叫 groups / permissions）。
 	Groups      []string `json:"groups"`
 	Permissions []string `json:"permissions"`
+	// Scope/ClientID 是第三方 OAuth 令牌的标记（与签发侧对齐）：站内会话令牌永不携带
+	// 这两项，携带即视为第三方授权（见 S01）。不进 JSON 输出、不暴露给调用方。
+	Scope    string `json:"-"`
+	ClientID string `json:"-"`
+	// IsThirdParty 标记身份来自第三方 OAuth 授权（scope/client_id/token_use 任一非空）。
+	// 管理 API 默认拒绝此类令牌（见 register.go 的 require），不进 JSON 输出。
+	IsThirdParty bool `json:"-"`
+	// PermissionsSet 标记令牌是否显式携带 permissions 声明（含空数组）：携带即以码为准，
+	// 显式空集合不得回落角色；缺字段才是老令牌，走 Can 的历史边界兜底。不进 JSON 输出。
+	PermissionsSet bool `json:"-"`
 	// FromPAT 标记身份来自 PAT 内省（而不是签发的 JWT）。它参与授权判定
 	// （见 permission.go：PAT 身份永不回落角色兜底），不进 JSON 输出、不暴露给调用方。
 	FromPAT bool `json:"-"`
@@ -99,6 +109,10 @@ func (c *SessionClient) Resolve(ctx context.Context, bearer, cookie string) (*Pr
 	if resp.StatusCode != http.StatusOK {
 		return nil, false
 	}
+	var raw json.RawMessage
+	if err = json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, false
+	}
 	var user struct {
 		ID          string   `json:"id"`
 		Username    string   `json:"username"`
@@ -106,13 +120,20 @@ func (c *SessionClient) Resolve(ctx context.Context, bearer, cookie string) (*Pr
 		Groups      []string `json:"groups"`
 		Permissions []string `json:"permissions"`
 	}
-	if err = json.NewDecoder(resp.Body).Decode(&user); err != nil || user.ID == "" {
+	if err = json.Unmarshal(raw, &user); err != nil || user.ID == "" {
 		return nil, false
 	}
-	// 权限组随 /api/auth/me 一起下发，缺字段（旧账号服务）时为空：判定层据此退回角色兜底。
+	// 权限组随 /api/auth/me 一起下发：是否出现 permissions 键决定走“以码为准”还是
+	// 历史角色兜底（显式空集合不得回落 admin，见 permission.go 的 Can）。
+	var keys map[string]json.RawMessage
+	_, permissionsSet := map[string]json.RawMessage{}, false
+	if err := json.Unmarshal(raw, &keys); err == nil {
+		_, permissionsSet = keys["permissions"]
+	}
 	return &Principal{
 		ID: user.ID, Username: user.Username, Role: user.Role,
 		Groups: user.Groups, Permissions: user.Permissions,
+		PermissionsSet: permissionsSet,
 	}, true
 }
 
@@ -146,7 +167,36 @@ type claims struct {
 	// 权限组到了本服务就是空的（老令牌不带这两项，走 Can 的角色兜底）。
 	Groups      []string `json:"groups"`
 	Permissions []string `json:"permissions"`
+	// Scope/ClientID/TokenUse 是第三方 OAuth 令牌的标记（与签发侧对齐）：站内会话
+	// 令牌永不携带这三项；audience 收口（Verify 的 WithAudience）已拒掉 aud 指向
+	// 客户端的令牌，这里再拦“aud 仍是平台但带 OAuth 标记”的那一种。
+	Scope     string `json:"scope"`
+	ClientID  string `json:"client_id"`
+	Cid       string `json:"cid"`
+	TokenUse  string `json:"token_use"`
+	TokenType string `json:"token_type"`
+	// permissionsPresent 记录载荷里是否出现 permissions 键（含空数组）：显式空集合
+	// 不得回落角色，只有缺字段的老令牌才走兜底（见 permission.go 的 Can）。
+	permissionsPresent bool
 	jwt.RegisteredClaims
+}
+
+// UnmarshalJSON 在标准 claims 解析之外多记一笔 permissions 键是否存在：
+// encoding/json 无法区分“缺字段”与“显式空数组”（两者都解成 len==0），
+// 而 S01 要求这两者走不同分支（显式空不得回落 admin）。
+func (c *claims) UnmarshalJSON(raw []byte) error {
+	type plain claims
+	var p plain
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return err
+	}
+	*c = claims(p)
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		return nil
+	}
+	_, c.permissionsPresent = keys["permissions"]
+	return nil
 }
 
 const keyCacheTTL = 10 * time.Minute
@@ -240,9 +290,20 @@ func (v *Verifier) Verify(token string) (*Principal, error) {
 	if c.Subject == "" {
 		return nil, errors.New("token without subject")
 	}
+	clientID := c.ClientID
+	if clientID == "" {
+		clientID = c.Cid
+	}
+	// 第三方判定：站内会话令牌永不带 scope/client_id/token_use，任一非空即第三方。
+	// audience 已在验签时收口（aud 非平台直接失败），这里拦的是“aud 仍是平台但带
+	// OAuth 标记”的令牌（签发侧过渡态，见 S01）。
+	thirdParty := strings.TrimSpace(c.Scope) != "" || strings.TrimSpace(clientID) != "" ||
+		strings.TrimSpace(c.TokenUse) != "" || strings.TrimSpace(c.TokenType) != ""
 	return &Principal{
 		ID: c.Subject, Username: c.Username, Role: c.Role,
 		Groups: c.Groups, Permissions: c.Permissions,
+		Scope: strings.TrimSpace(c.Scope), ClientID: strings.TrimSpace(clientID),
+		IsThirdParty: thirdParty, PermissionsSet: c.permissionsPresent,
 	}, nil
 }
 
