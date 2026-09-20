@@ -153,6 +153,73 @@ func (c *Client) Lookup(ctx context.Context, entityID string) (Entity, error) {
 	return e, nil
 }
 
+// ResolveCanonical 把请求 ID 归一到存活身份（canonical）：合并 A→B 后对 A 的新写
+// 必须落到 B，否则 B 页永远看不到 A 的历史评论/收藏（见 X01）。实现即 Lookup
+// （已跟随 /resolve）：返回 "" + nil 表示目录明确回答不可见/不存在，调用方按 404；
+// err != nil 表示取不到，调用方按 503。未配置上游地址时原样返回请求 ID（既有行为）。
+func (c *Client) ResolveCanonical(ctx context.Context, entityID string) (string, error) {
+	if entityID == "" {
+		return "", nil
+	}
+	if c.base == "" {
+		return entityID, nil
+	}
+	e, err := c.Lookup(ctx, entityID)
+	if err != nil {
+		return "", err
+	}
+	if e.ID == "" {
+		return "", nil
+	}
+	return e.ID, nil
+}
+
+// ResolveMany 批量归一请求 ID 到 canonical（目录暂无批量解析端点，这里复用
+// LookupMany 的有界并发逐条取；目录补齐批量契约后改这一处即可，调用方不动）。
+// 返回 requested→canonical（不可见的记 ""，调用方按 404/跳过）；err != nil 表示上游
+// 不可用，调用方必须整请求 503（部分结果里缺的条目分不清“不可见”还是“取不到”）。
+func (c *Client) ResolveMany(ctx context.Context, ids []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	if c.base == "" {
+		for _, id := range ids {
+			out[id] = id
+		}
+		return out, nil
+	}
+	meta, err := c.LookupMany(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		if e, ok := meta[id]; ok && e.ID != "" {
+			out[id] = e.ID
+		} else {
+		out[id] = ""
+		}
+	}
+	return out, nil
+}
+
+// AliasSet 组装一次读取要覆盖的 ID 集合：{canonical + 全部请求 ID} 去重。
+// 这是 X01 的兼容实现：目录补齐“canonical→历史别名”反向契约前，反向（读 B 找历史 A）
+// 无法枚举——新写已归一 canonical，读 A（含 A 与 B）正确，读 B 仅含 B（历史 A 行待回填，
+// 见 handler 的 canonicalEntity 注释）。目录契约就绪后改这一处展开全别名即可。
+func AliasSet(canonical string, requested ...string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, id := range append(append([]string{}, requested...), canonical) {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
 // LookupMany 批量取实体投影：目录没有批量端点，这里用有界并发逐条取。
 //
 // 返回部分结果 + err，其中只有"上游不可用"会置 err（单条不可见不是错误，只是不在结果里）。

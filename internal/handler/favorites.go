@@ -44,7 +44,8 @@ func (h *Handler) registerFavorites(api *gin.RouterGroup) {
 			fail(c, 404, "not_found")
 			return
 		}
-		targetID := strings.TrimSpace(in.TargetID)
+		// X01：Lookup 已跟随 /resolve，entity.ID 即 canonical；新写归一 canonical。
+		targetID := entity.ID
 		favorited, err := h.store.ToggleFavorite(c.Request.Context(), h.principal(c).ID, targetType, targetID)
 		if err != nil {
 			fail(c, 500, "module_error")
@@ -72,12 +73,43 @@ func (h *Handler) registerFavorites(api *gin.RouterGroup) {
 				ids = append(ids, id)
 			}
 		}
-		v, err := h.store.FavoriteStatus(c.Request.Context(), p.ID, c.Query("target_type"), ids)
+		// X01：按 canonical 查状态（请求别名 A 归一到 B 后查 B，再映射回请求 ID）。
+		// 非法 UUID 直接视为未收藏：送进 uuid 列只会拿到 pq 解析错误（旧实现曾 500 回显）。
+		valid := []string{}
+		for _, id := range ids {
+			if _, err := uuid.Parse(id); err == nil {
+				valid = append(valid, id)
+			}
+		}
+		resolved, err := h.catalog.ResolveMany(c.Request.Context(), valid)
+		if err != nil {
+			failUpstream(c)
+			return
+		}
+		canonicals := []string{}
+		seen := map[string]bool{}
+		for _, id := range ids {
+			if canonical := resolved[id]; canonical != "" && !seen[canonical] {
+				seen[canonical] = true
+				canonicals = append(canonicals, canonical)
+			}
+		}
+		v, err := h.store.FavoriteStatus(c.Request.Context(), p.ID, c.Query("target_type"), canonicals)
 		if err != nil {
 			fail(c, storeErrorStatus(err), storeErrorCode(err))
 			return
 		}
-		c.JSON(200, gin.H{"favorited": v})
+		hit := map[string]bool{}
+		for _, id := range v {
+			hit[id] = true
+		}
+		out := []string{}
+		for _, id := range ids {
+			if canonical := resolved[id]; canonical != "" && hit[canonical] {
+				out = append(out, id)
+			}
+		}
+		c.JSON(200, gin.H{"favorited": out})
 	})
 
 	// 我的收藏需登录：普通用户可列出自己的收藏。

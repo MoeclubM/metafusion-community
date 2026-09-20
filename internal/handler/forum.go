@@ -16,6 +16,7 @@ import (
 
 	"github.com/MoeclubM/metafusion-community/internal/audit"
 	"github.com/MoeclubM/metafusion-community/internal/auth"
+	"github.com/MoeclubM/metafusion-community/internal/catalog"
 )
 
 // 论坛是本站自建的独立讨论系统：板块（board）→ 主题（topic）→ 回复（post）。
@@ -343,8 +344,17 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 				c.JSON(200, gin.H{"items": []any{}, "total": 0})
 				return
 			}
-			args = append(args, raw)
-			where = append(where, fmt.Sprintf("t.entity_id=$%d", len(args)))
+			canonical, err := h.catalog.ResolveCanonical(c.Request.Context(), raw)
+			if err != nil {
+				failUpstream(c)
+				return
+			}
+			if canonical == "" {
+				c.JSON(200, gin.H{"items": []any{}, "total": 0})
+				return
+			}
+			args = append(args, pq.Array(catalog.AliasSet(canonical, raw)))
+			where = append(where, fmt.Sprintf("t.entity_id = ANY($%d::uuid[])", len(args)))
 		}
 		// 标签筛选按名称或 id 命中关联表。
 		if tagID := strings.TrimSpace(c.Query("tag_id")); tagID != "" {
@@ -520,9 +530,11 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 				fail(c, 400, "invalid_reference")
 				return
 			}
-			if !h.entity(c, entityID) {
+			canonical, ok := h.canonicalEntity(c, entityID)
+			if !ok {
 				return
 			}
+			entityID = canonical
 		}
 		p := h.principal(c)
 		tid := uuid.NewString()

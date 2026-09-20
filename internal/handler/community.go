@@ -9,9 +9,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"github.com/MoeclubM/metafusion-community/internal/audit"
 	"github.com/MoeclubM/metafusion-community/internal/auth"
+	"github.com/MoeclubM/metafusion-community/internal/catalog"
 )
 
 // registerCommunity 挂载短评（评论流/条目评论）。
@@ -30,13 +32,24 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 			where = append(where, enabledBoardGuard("t"))
 		}
 		// entity_id 必须是合法 UUID，否则直接判为空结果，而不是把非法字面量送进查询。
+		// X01：按 canonical 汇别名——读请求 ID 的评论要含 canonical 行（AliasSet），
+		// 新写已归一 canonical，历史别名行靠集合覆盖（反向全枚举待目录契约）。
 		if raw := strings.TrimSpace(c.Query("entity_id")); raw != "" {
 			if _, err := uuid.Parse(raw); err != nil {
 				c.JSON(200, gin.H{"items": []any{}})
 				return
 			}
-			args = append(args, raw)
-			where = append(where, fmt.Sprintf("t.entity_id = $%d", len(args)))
+			canonical, err := h.catalog.ResolveCanonical(c.Request.Context(), raw)
+			if err != nil {
+				failUpstream(c)
+				return
+			}
+			if canonical == "" {
+				c.JSON(200, gin.H{"items": []any{}})
+				return
+			}
+			args = append(args, pq.Array(catalog.AliasSet(canonical, raw)))
+			where = append(where, fmt.Sprintf("t.entity_id = ANY($%d::uuid[])", len(args)))
 		}
 		// q 需同时匹配正文与条目标题，而标题不属本 schema、无法在 SQL 内完成；
 		// 因此带 q 时取一个有界窗口后在 Go 侧过滤，无 q 时把 LIMIT 下推。
@@ -123,15 +136,16 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 	// URL 契约沿用 /community/entities/:id/posts，前端无需改动。
 	api.GET("/community/entities/:id/posts", h.guard(false), func(c *gin.Context) {
 		id := c.Param("id")
-		if !h.entity(c, id) {
+		canonical, ok := h.canonicalEntity(c, id)
+		if !ok {
 			return
 		}
-		// 评论板块停用时，条目下的短评同样不再公开（谓词与其余读路径同一份，见 enabledBoardGuard）。
-		query := `SELECT id::text,author_id::text,COALESCE(NULLIF(author_name, ''), 'Anonymous'),body,created_at FROM community.topics t WHERE t.board_code=$1 AND t.entity_id=$2`
+		// X01：按 canonical 汇别名读取（新写已归一 canonical，历史别名行靠集合覆盖）。
+		query := `SELECT id::text,author_id::text,COALESCE(NULLIF(author_name, ''), 'Anonymous'),body,created_at FROM community.topics t WHERE t.board_code=$1 AND t.entity_id = ANY($2::uuid[])`
 		if !h.seesDisabledBoards(c) {
 			query += " AND " + enabledBoardGuard("t")
 		}
-		rows, err := h.db.QueryContext(c.Request.Context(), query+" ORDER BY created_at DESC LIMIT 100", commentBoard, id)
+		rows, err := h.db.QueryContext(c.Request.Context(), query+" ORDER BY created_at DESC LIMIT 100", commentBoard, pq.Array(catalog.AliasSet(canonical, id)))
 		if err != nil {
 			fail(c, 500, "module_error")
 			return
@@ -153,7 +167,8 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 	// 短评也是发帖：与发主题/回帖共用 community.post.create，避免"能发主题但不能短评"的缺口。
 	api.POST("/community/entities/:id/posts", h.require(auth.PermissionPostCreate), func(c *gin.Context) {
 		id := c.Param("id")
-		if !h.entity(c, id) {
+		canonical, ok := h.canonicalEntity(c, id)
+		if !ok {
 			return
 		}
 		var in struct {
@@ -164,16 +179,17 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 		}
 		p := h.principal(c)
 		pid := uuid.NewString()
-		_, err := h.db.ExecContext(c.Request.Context(), `INSERT INTO community.topics(id,board_code,author_id,author_name,title,body,entity_id) VALUES($1,$2,$3,$4,'',$5,$6)`, pid, commentBoard, p.ID, authorName(p), in.Body, id)
+		// X01：新写归一 canonical（请求别名 A 合并到 B 后落到 B，B 页可聚合）。
+		_, err := h.db.ExecContext(c.Request.Context(), `INSERT INTO community.topics(id,board_code,author_id,author_name,title,body,entity_id) VALUES($1,$2,$3,$4,'',$5,$6)`, pid, commentBoard, p.ID, authorName(p), in.Body, canonical)
 		if err != nil {
 			fail(c, 500, "module_error")
 			return
 		}
 		// 短评正文不进审计（与发主题同一口径：审计表不存请求体原文），只记它锚定哪个条目。
-		audit.Describe(c, audit.Detail{TargetType: "comment", TargetID: pid, Changes: map[string]any{"entity_id": id}})
+		audit.Describe(c, audit.Detail{TargetType: "comment", TargetID: pid, Changes: map[string]any{"entity_id": canonical}})
 		// 通知是同一次请求内的旁路步骤：投递失败只记日志，不改这次短评的结果
 		//（收件人解析、扇出上界与批预算见 notifications.go）。
-		h.notifyEntityComment(c, id, pid, in.Body)
+		h.notifyEntityComment(c, canonical, id, pid, in.Body)
 		c.JSON(200, gin.H{
 			"ok": true,
 			"item": map[string]any{

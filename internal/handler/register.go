@@ -125,6 +125,24 @@ func (h *Handler) principal(c *gin.Context) *auth.Principal { return auth.Curren
 // entity 确认实体对调用者可见；不可见一律 404，不区分"不存在"与"无权限"。
 // 取不到目录是另一回事：503 + upstream_unavailable。把它当成 404 会让"依赖挂了"以
 // "这个条目不存在"的形式呈现给用户与监控，正是这次要消掉的静默降级。
+// canonicalEntity 确认实体对调用者可见并返回归一后的 canonical ID（X01）：
+// 合并 A→B 后对 A 的新写必须落到 B，读 A/B 都要覆盖别名集合（见 catalog.AliasSet）。
+// 返回 ("", false) 时响应已写出（404 不可见 / 503 取不到），调用方直接 return。
+// 历史缺口：读 B 尚不能枚举全部历史别名 A（需目录反向契约），新写归一 + 读 A 覆盖双 ID
+// 已正确；历史 A 行在 B 页的聚合待目录契约就绪后由 AliasSet 展开 + 数据回填补齐。
+func (h *Handler) canonicalEntity(c *gin.Context, id string) (string, bool) {
+	e, err := h.catalog.Lookup(c.Request.Context(), id)
+	if err != nil {
+		failUpstream(c)
+		return "", false
+	}
+	if e.ID == "" {
+		fail(c, 404, "not_found")
+		return "", false
+	}
+	return e.ID, true
+}
+
 func (h *Handler) entity(c *gin.Context, id string) bool {
 	e, err := h.catalog.Lookup(c.Request.Context(), id)
 	if err != nil {

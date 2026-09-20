@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 
 	"github.com/MoeclubM/metafusion-community/internal/catalog"
 )
@@ -67,14 +68,17 @@ func (h *Handler) deliverAll(c *gin.Context, msgs []catalog.Notification) {
 
 // commentParticipants 返回同一条目下最近参与评论的其他人（不含作者本人，最多 participantFanout 人）。
 // 查询失败返回空表：通知是旁路，不能因为"算不清收件人"让已经成功的短评变成 500。
-func (h *Handler) commentParticipants(ctx context.Context, entityID, actorID string) []string {
+func (h *Handler) commentParticipants(ctx context.Context, entityIDs []string, actorID string) []string {
+	if len(entityIDs) == 0 {
+		return nil
+	}
 	rows, err := h.db.QueryContext(ctx, `
 		SELECT author_id::text FROM community.topics
-		WHERE board_code=$1 AND entity_id=$2 AND author_id <> $3
+		WHERE board_code=$1 AND entity_id = ANY($2::uuid[]) AND author_id <> $3
 		GROUP BY author_id ORDER BY max(created_at) DESC LIMIT $4`,
-		commentBoard, entityID, actorID, participantFanout)
+		commentBoard, pq.Array(entityIDs), actorID, participantFanout)
 	if err != nil {
-		log.Printf("community notification recipients lookup failed: entity=%s err=%v", entityID, err)
+		log.Printf("community notification recipients lookup failed: entities=%v err=%v", entityIDs, err)
 		return nil
 	}
 	defer rows.Close()
@@ -100,13 +104,14 @@ func (h *Handler) entityProjectionForNotify(ctx context.Context, entityID string
 	return e.Title, e.Kind
 }
 
-// notifyEntityComment 是短评（参与式关注）的产生端。
-func (h *Handler) notifyEntityComment(c *gin.Context, entityID, commentID, body string) {
+// notifyEntityComment 是短评（参与式关注）的产生端：entityID 必须已归一 canonical，
+// requested 保留请求别名以覆盖历史参与人（X01 别名集合，见 commentParticipants）。
+func (h *Handler) notifyEntityComment(c *gin.Context, entityID, requested, commentID, body string) {
 	p := h.principal(c)
 	if p == nil {
 		return
 	}
-	recipients := h.commentParticipants(c.Request.Context(), entityID, p.ID)
+	recipients := h.commentParticipants(c.Request.Context(), catalog.AliasSet(entityID, requested), p.ID)
 	if len(recipients) == 0 {
 		return
 	}
