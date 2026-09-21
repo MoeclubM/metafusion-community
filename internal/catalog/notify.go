@@ -47,6 +47,9 @@ type Notification struct {
 	// 评论回复按"被回复的落点"聚合（同一主题的多条回复是一行 + count）。
 	DedupeKey string `json:"dedupe_key"`
 	// EventID 让上游重试幂等（目录侧按它判"同一事件"）：传新建回复/评论的 id。
+	// 同一业务事件通知多人时各收件人共用同一个 EventID（论坛回帖的 post id）：
+	// 本服务待投递表的幂等键是 (收件人, 事件) 复合（000012），目录侧按
+	// (收件人, dedupe_key, last_event_id) 去重，两边都不把“多人”误判成“重复”。
 	EventID string `json:"event_id"`
 }
 

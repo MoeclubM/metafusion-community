@@ -1,24 +1,26 @@
 package handler
 
-// 互动服务的**通知产生端**：把"评论被回复"这件事投递给目录服务的收件箱。
+// 互动服务的**尽力投递产生端**：实体短评的参与式广播（S4 明确为尽力，不进 outbox）。
 //
-// 为什么是这两条路径（证据在 docs-local/report-f1-notifications/REPORT.md）：
-//   - 论坛回帖 POST /community/topics/:id/posts 有明确的回复目标（reply_to_post_number /
-//     reply_to_post_id），收件人 = 被回复楼层作者，没有回复目标时 = 主题作者。
-//   - 实体短评 POST /community/entities/:id/posts **没有回复关系**：短评是
-//     community.topics 里 board_code=comment 的行，表里没有 parent 列，写入体也只有 body，
-//     前端也没有"回复某条短评"的入口。因此这里用的是**参与式关注**语义：
-//     给"同一条目下最近评论过的其他人"各发一条（每个收件人按条目聚合成一行 + count），
-//     而不是编造一个并不存在的回复关系。
+// 为什么只剩这一条路径留在这里（证据在 docs-local/report-f1-notifications/REPORT.md）：
+// 实体短评 POST /community/entities/:id/posts **没有回复关系**：短评是
+// community.topics 里 board_code=comment 的行，表里没有 parent 列，写入体也只有 body，
+// 前端也没有"回复某条短评"的入口。因此这里用的是**参与式关注**语义：
+// 给"同一条目下最近评论过的其他人"各发一条（每个收件人按条目聚合成一行 + count），
+// 而不是编造一个并不存在的回复关系。论坛定向回帖不在这里：收件人明确
+// （被回复楼层作者 / 主题作者），走 community.notification_outbox 可靠送达
+// （回帖事务内入队 + 提交后试投 + worker 重试，见 notifications_outbox.go）。
 //
-// 投递是旁路：写请求已经提交，通知发不出去只记日志（与审计旁路同一哲学）。
+// 刻意保持尽力投递的三条理由（S4 项 4）：扇出可达 10 人、迟到的提醒没有价值、
+// 同一评论为每人各存一行会把一次评论放大成 10 行 DB 写。投递是旁路：
+// 写请求已经提交，通知发不出去只记日志（与审计旁路同一哲学）。
 // 扇出有上界（participantFanout）且整批共享一个 deadline（notifyBudget）：
 // 热门条目不该让一次评论变成 20 次串行跨服务调用，真人等的还是那个 POST。
 //
 // X02 边界：以上是尽力投递（best-effort，comment.replied）——迟到的提醒没有价值。
-// 审核/安全/处置类必须送达的通知走 community.notification_outbox（见
-// notifications_outbox.go）：先落库（event_id 幂等），再由重试器投递到目录收件箱，
-// 退避/过期/失败查询齐备。不引入 Kafka：量级与语义用本库表即够。
+// 必须送达的论坛定向回帖走 community.notification_outbox：回帖事务内入队
+// （(收件人, 事件) 幂等），提交后立即试投，worker 按退避重试。不引入 Kafka：
+// 量级与语义用本库表即够。
 
 import (
 	"context"
@@ -151,64 +153,6 @@ func (h *Handler) notifyEntityComment(c *gin.Context, entityID, requested, comme
 	h.deliverAll(c, msgs)
 }
 
-// notifyTopicReply 是论坛回帖的产生端：收件人 = 被回复楼层作者 →（无回复目标时）主题作者。
-// 两位收件人都存在时都发（同一条回复既回答了提问者、也挂在主题作者下面）。
-func (h *Handler) notifyTopicReply(c *gin.Context, topicID, postID string, replyTo *int, body string) {
-	p := h.principal(c)
-	if p == nil {
-		return
-	}
-	ctx := c.Request.Context()
-	var topicAuthor, topicTitle, entityID string
-	if err := h.db.QueryRowContext(ctx,
-		`SELECT COALESCE(author_id::text,''),COALESCE(title,''),COALESCE(entity_id::text,'') FROM community.topics WHERE id=$1`,
-		topicID).Scan(&topicAuthor, &topicTitle, &entityID); err != nil {
-		log.Printf("community notification topic lookup failed: topic=%s err=%v", topicID, err)
-		return
-	}
-	recipients := []string{}
-	seen := map[string]bool{}
-	add := func(id string) {
-		if id == "" || id == p.ID || seen[id] {
-			return
-		}
-		seen[id] = true
-		recipients = append(recipients, id)
-	}
-	repliedTo := ""
-	if replyTo != nil {
-		_ = h.db.QueryRowContext(ctx,
-			`SELECT COALESCE(author_id::text,'') FROM community.posts WHERE topic_id=$1 AND post_number=$2`,
-			topicID, *replyTo).Scan(&repliedTo)
-	}
-	add(repliedTo)
-	add(topicAuthor)
-	if len(recipients) == 0 {
-		return
-	}
-	payload := map[string]any{
-		"topic_id":    topicID,
-		"topic_title": topicTitle,
-		"excerpt":     notifyExcerpt(body),
-		"via":         "topic_reply",
-	}
-	if entityID != "" {
-		payload["entity_id"] = entityID
-	}
-	if replyTo != nil {
-		payload["reply_to_post_number"] = *replyTo
-	}
-	msgs := make([]catalog.Notification, 0, len(recipients))
-	for _, rid := range recipients {
-		msgs = append(msgs, catalog.Notification{
-			RecipientID: rid,
-			Type:        catalog.NotificationCommentReplied,
-			SubjectType: "topic",
-			SubjectID:   topicID,
-			DedupeKey:   "comment.replied:topic:" + topicID,
-			EventID:     postID,
-			Payload:     payload,
-		})
-	}
-	h.deliverAll(c, msgs)
-}
+// 注：论坛回帖的旧尽力投递路径（notifyTopicReply）已在 S4 接通时移除：
+// 回帖通知改为必须送达——forum.go 在回帖事务内入队（enqueueTopicReply），
+// 提交后立即试投 + worker 重试，收件人与载荷口径见该函数。本文件只留实体短评的尽力广播。

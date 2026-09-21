@@ -637,9 +637,12 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 		// post_number 在主题内单调递增。必须锁"主题行"而不是聚合查询：
 		// PostgreSQL 不允许 FOR UPDATE 与 MAX() 等聚合函数同时出现。
 		// 先锁住该主题即可把同一主题的回帖串行化，再取当前最大楼号。
+		// 锁行的同时把通知需要的主题作者/标题/实体一起读出：收件人与载荷在提交前确定，
+		// 待投递行与回帖行同事务落库（S4 必须送达），提交后崩溃不丢通知。
 		var lockedNow bool
+		var topicAuthor, topicTitle, topicEntity string
 		if err = tx.QueryRowContext(c.Request.Context(),
-			"SELECT is_locked FROM community.topics WHERE id=$1 FOR UPDATE", topicID).Scan(&lockedNow); err == sql.ErrNoRows {
+			"SELECT is_locked, COALESCE(author_id::text,''), COALESCE(title,''), COALESCE(entity_id::text,'') FROM community.topics WHERE id=$1 FOR UPDATE", topicID).Scan(&lockedNow, &topicAuthor, &topicTitle, &topicEntity); err == sql.ErrNoRows {
 			// 主题在预检与开启事务之间被删除。
 			fail(c, 404, "not_found")
 			return
@@ -675,6 +678,14 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			fail(c, 500, "module_error")
 			return
 		}
+		// S4 必须送达：收件人 = 被回复楼层作者 → 主题作者（去掉自己，去重后最多两人，
+		// 同一事件各收件人各存一行）。入队与回帖同事务：入队失败则回帖一起回滚，
+		// 不出现“回帖成功、通知凭空消失”的半截状态。
+		pending, enqueueErr := h.enqueueTopicReply(c.Request.Context(), tx, p.ID, topicID, pid, replyTo, topicAuthor, topicTitle, topicEntity, content)
+		if enqueueErr != nil {
+			fail(c, 500, "module_error")
+			return
+		}
 		if err = tx.Commit(); err != nil {
 			fail(c, 500, "module_error")
 			return
@@ -685,8 +696,12 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			changes["reply_to_post_number"] = *replyTo
 		}
 		audit.Describe(c, audit.Detail{TargetType: "post", TargetID: pid, Changes: changes})
-		// 回帖的通知是旁路（见 notifications.go）：收件人 = 被回复楼层作者 → 主题作者。
-		h.notifyTopicReply(c, topicID, pid, replyTo, content)
+		// 入队后立即试投一次（与 worker 同一投递函数，成功即置 sent）：首试成功时收件人
+		// 无须等 worker 周期；失败的行仍是 pending，worker 按退避重试。
+		// 实体短评的参与式广播不在这里（见 notifications.go）：那是尽力投递。
+		for _, item := range pending {
+			h.deliverOutboxItem(c.Request.Context(), item)
+		}
 		c.JSON(200, gin.H{
 			"id": pid, "topic_id": topicID, "user_id": p.ID, "author_name": authorName(p),
 			"content": content, "post_number": next, "reply_to_post_number": replyTo,
