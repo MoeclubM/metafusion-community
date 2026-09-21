@@ -127,21 +127,30 @@ func (h *Handler) principal(c *gin.Context) *auth.Principal { return auth.Curren
 // 取不到目录是另一回事：503 + upstream_unavailable。把它当成 404 会让"依赖挂了"以
 // "这个条目不存在"的形式呈现给用户与监控，正是这次要消掉的静默降级。
 // canonicalEntity 确认实体对调用者可见并返回归一后的 canonical ID（X01）：
-// 合并 A→B 后对 A 的新写必须落到 B，读 A/B 都要覆盖别名集合（见 catalog.AliasSet）。
+// 合并 A→B 后对 A 的新写必须落到 B，读 A/B 都要覆盖别名集合（见 catalog.ResolveAliasSet）。
 // 返回 ("", false) 时响应已写出（404 不可见 / 503 取不到），调用方直接 return。
-// 历史缺口：读 B 尚不能枚举全部历史别名 A（需目录反向契约），新写归一 + 读 A 覆盖双 ID
-// 已正确；历史 A 行在 B 页的聚合待目录契约就绪后由 AliasSet 展开 + 数据回填补齐。
+// X01-compat：canonical 取自目录身份契约；读存活页聚合全部历史别名待目录反向契约，
+// 新写归一 + 前向链覆盖已正确，历史行在存活页的聚合待契约就绪后由展开点自动补齐。
 func (h *Handler) canonicalEntity(c *gin.Context, id string) (string, bool) {
-	e, err := h.catalog.Lookup(c.Request.Context(), id)
+	canonical, _, ok := h.aliasSet(c, id)
+	return canonical, ok
+}
+
+// aliasSet 是 X01 读路径统一的“可见性确认 + 别名展开”：返回 canonical 与
+// {canonical + 全量历史别名} 去重集合，调用方直接用于 entity_id = ANY($集)。
+// 展开逻辑只有 catalog.ResolveAliasSet 一处实现，这里只负责把它的三种结果
+// 翻成响应（404 不可见 / 503 取不到），不拼集合、不回退——回退只发生在 client 内。
+func (h *Handler) aliasSet(c *gin.Context, id string) (string, []string, bool) {
+	canonical, set, err := h.catalog.ResolveAliasSet(c.Request.Context(), id)
 	if err != nil {
 		failUpstream(c)
-		return "", false
+		return "", nil, false
 	}
-	if e.ID == "" {
+	if canonical == "" {
 		fail(c, 404, "not_found")
-		return "", false
+		return "", nil, false
 	}
-	return e.ID, true
+	return canonical, set, true
 }
 
 func (h *Handler) entity(c *gin.Context, id string) bool {

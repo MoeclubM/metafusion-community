@@ -72,6 +72,35 @@ func (s *Store) ToggleFavorite(ctx context.Context, userID, targetType, targetID
 	return true, tx.Commit()
 }
 
+// ToggleFavoriteSet 按别名集合切换并返回切换后是否已收藏（X01）：
+// 集合内任一行存在即视为已收藏——删除集合内全部行（取消），否则插入 canonical。
+// 合并后历史行（A）与归一新行（B）不再并存：历史收藏在下一次切换时收敛到 canonical，
+// 与状态查询（按集合判定）同口径，去重正确。调用方须保证 canonical 在 aliases 内。
+func (s *Store) ToggleFavoriteSet(ctx context.Context, userID, targetType, canonical string, aliases []string) (bool, error) {
+	if _, err := KindFor(targetType); err != nil {
+		return false, err
+	}
+	if len(aliases) == 0 {
+		aliases = []string{canonical}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, "DELETE FROM community.favorites WHERE user_id=$1 AND target_type=$2 AND target_id = ANY($3::uuid[])", userID, targetType, pq.Array(aliases))
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return false, tx.Commit()
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO community.favorites(user_id,target_type,target_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", userID, targetType, canonical); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
 // FavoriteStatus 返回给定 ID 集合中已收藏的部分（按 target_type 限定）。
 func (s *Store) FavoriteStatus(ctx context.Context, userID, targetType string, targetIDs []string) ([]string, error) {
 	if _, err := KindFor(targetType); err != nil {

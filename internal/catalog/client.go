@@ -197,16 +197,171 @@ func (c *Client) ResolveMany(ctx context.Context, ids []string) (map[string]stri
 		if e, ok := meta[id]; ok && e.ID != "" {
 			out[id] = e.ID
 		} else {
-		out[id] = ""
+			out[id] = ""
 		}
 	}
 	return out, nil
 }
 
-// AliasSet 组装一次读取要覆盖的 ID 集合：{canonical + 全部请求 ID} 去重。
-// 这是 X01 的兼容实现：目录补齐“canonical→历史别名”反向契约前，反向（读 B 找历史 A）
-// 无法枚举——新写已归一 canonical，读 A（含 A 与 B）正确，读 B 仅含 B（历史 A 行待回填，
-// 见 handler 的 canonicalEntity 注释）。目录契约就绪后改这一处展开全别名即可。
+// IdentityResolution 是目录身份契约的只读投影（主仓 lifecycle.go 的 IdentityResolution）：
+// canonical_id 为存活身份，aliases 为请求 ID 沿 merged 链走过的历史别名。
+// 注意它今天是前向的：查存活身份 D 拿不到曾合入的历史 A/B（目录侧只沿请求 ID 向前走），
+// 存活→历史的反向枚举待目录契约补齐；本服务把展开收敛在 ResolveAliasSet 一处，
+// 反向契约就绪后调用方不动（见 ResolveAliasSet 的 X01-compat 注释）。
+type IdentityResolution struct {
+	CanonicalID string   `json:"canonical_id"`
+	Aliases     []string `json:"aliases"`
+	Entity      Entity   `json:"entity"`
+}
+
+// Identity 取单个身份解析。零值 + nil = 目录明确回答不可见/不存在；err != nil = 取不到。
+//
+// X01-compat（目录无反向契约时的回退）：/identity 不存在（旧目录回 404）且 Lookup 能
+// 见到实体时，按 Lookup 结果拼 {canonical + 请求 ID}；Lookup 同样不可见则按不可见回。
+// 非 404 的失败一律按上游不可用上报，不回退——把故障当兼容会丢监控信号。
+func (c *Client) Identity(ctx context.Context, entityID string) (IdentityResolution, error) {
+	if c.base == "" || entityID == "" {
+		if entityID == "" {
+			return IdentityResolution{}, nil
+		}
+		return IdentityResolution{CanonicalID: entityID}, nil
+	}
+	resp, err := c.up.Do(ctx, upstream.Request{
+		Method: http.MethodGet,
+		URL:    c.base + "/api/catalog/entities/" + entityID + "/identity",
+		Header: outboundHeaders(ctx),
+	})
+	if err != nil {
+		return IdentityResolution{}, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var v IdentityResolution
+		if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+			return IdentityResolution{}, upstreamError(c.name(), upstream.ReasonBadResponse, 0, err)
+		}
+		if v.CanonicalID == "" {
+			return IdentityResolution{}, upstreamError(c.name(), upstream.ReasonBadResponse, 0, errors.New("identity payload without canonical_id"))
+		}
+		return v, nil
+	case http.StatusNotFound:
+		// 新目录 = 实体不可见/不存在；旧目录 = 根本没有这条路由。Lookup 再问一次区分。
+		e, lerr := c.Lookup(ctx, entityID)
+		if lerr != nil {
+			return IdentityResolution{}, lerr
+		}
+		if e.ID == "" {
+			return IdentityResolution{}, nil
+		}
+		aliases := []string{}
+		if entityID != e.ID {
+			aliases = []string{entityID}
+		}
+		return IdentityResolution{CanonicalID: e.ID, Aliases: aliases, Entity: e}, nil
+	default:
+		return IdentityResolution{}, upstreamError(c.name(), statusReason(resp.StatusCode), resp.StatusCode, nil)
+	}
+}
+
+// IdentityMany 批量取身份解析（目录 POST /api/catalog/entities/identity，上限 500）。
+// 返回 requested→解析（不可见的不在结果里，调用方按 404/跳过）；err != nil = 上游不可用。
+//
+// X01-compat：旧目录无批量路由（404）时按 LookupMany 逐条拼兼容解析，调用方不动。
+func (c *Client) IdentityMany(ctx context.Context, ids []string) (map[string]IdentityResolution, error) {
+	out := map[string]IdentityResolution{}
+	if c.base == "" || len(ids) == 0 {
+		if c.base == "" {
+			for _, id := range ids {
+				if id != "" {
+					out[id] = IdentityResolution{CanonicalID: id}
+				}
+			}
+		}
+		return out, nil
+	}
+	raw, err := json.Marshal(map[string]any{"ids": ids})
+	if err != nil {
+		return nil, err
+	}
+	header := outboundHeaders(ctx)
+	header.Set("Content-Type", "application/json")
+	resp, err := c.up.Do(ctx, upstream.Request{
+		Method: http.MethodPost,
+		URL:    c.base + "/api/catalog/entities/identity",
+		Header: header,
+		Body:   raw,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var payload struct {
+			Items   map[string]IdentityResolution `json:"items"`
+			Missing []string                      `json:"missing"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			return nil, upstreamError(c.name(), upstream.ReasonBadResponse, 0, err)
+		}
+		for id, v := range payload.Items {
+			if v.CanonicalID != "" {
+				out[id] = v
+			}
+		}
+		return out, nil
+	case http.StatusNotFound:
+		// 旧目录无批量路由：按 LookupMany 拼兼容解析（不可见的记缺席）。
+		meta, lerr := c.LookupMany(ctx, ids)
+		if lerr != nil {
+			return nil, lerr
+		}
+		for _, id := range ids {
+			if e, ok := meta[id]; ok && e.ID != "" {
+				aliases := []string{}
+				if id != e.ID {
+					aliases = []string{id}
+				}
+				out[id] = IdentityResolution{CanonicalID: e.ID, Aliases: aliases, Entity: e}
+			}
+		}
+		return out, nil
+	default:
+		return nil, upstreamError(c.name(), statusReason(resp.StatusCode), resp.StatusCode, nil)
+	}
+}
+
+// ResolveAliasSet 是 X01 读路径唯一的别名展开点：一次调用拿齐 {canonical + 全量历史别名}。
+// 成功时返回的集合已含请求 ID 自身并去重，调用方直接用于 entity_id = ANY($集)；
+// ("", nil, nil) = 不可见/不存在；err != nil = 取不到（调用方 503）。
+//
+// X01-compat（反向契约未落地）：目录今天只回前向别名，读存活身份 D 拿不到历史 A/B，
+// 此时集合退化为 {D + 请求 ID}——读 A 覆盖前向链正确，读 D 仍只含 D（历史 A/B 行待回填）。
+// 目录补齐存活→历史反向后，同一调用自动拿到全量，SQL 与调用方都不用改。
+func (c *Client) ResolveAliasSet(ctx context.Context, requested string) (string, []string, error) {
+	if requested == "" {
+		return "", nil, nil
+	}
+	if c.base == "" {
+		// 未配置上游地址与“没有这个实体”同解（同 LookupRaw 既有口径）：读路径按 404，
+		// 且调用方不得再查库（见 handler 的 TestAuthBoundaryBeforeDatabase）。
+		return "", nil, nil
+	}
+	v, err := c.Identity(ctx, requested)
+	if err != nil {
+		return "", nil, err
+	}
+	if v.CanonicalID == "" {
+		return "", nil, nil
+	}
+	return v.CanonicalID, AliasSet(v.CanonicalID, append(append([]string{requested}, v.Aliases...), v.Entity.ID)...), nil
+}
+
+// AliasSet 组装一次读取要覆盖的 ID 集合：{canonical + 传入的全部历史别名} 去重保序。
+// 它是纯函数：全量历史由调用方经 ResolveAliasSet/IdentityMany 从目录身份契约取来，
+// 这里只做去重；目录反向契约未落地前，调用方只能传 {请求 ID}，读存活页的聚合因此不完整
+// （见 ResolveAliasSet 的 X01-compat 注释），不要在本函数里把“集合很小”当成正确。
 func AliasSet(canonical string, requested ...string) []string {
 	seen := map[string]bool{}
 	out := []string{}

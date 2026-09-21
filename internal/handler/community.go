@@ -13,7 +13,6 @@ import (
 
 	"github.com/MoeclubM/metafusion-community/internal/audit"
 	"github.com/MoeclubM/metafusion-community/internal/auth"
-	"github.com/MoeclubM/metafusion-community/internal/catalog"
 )
 
 // registerCommunity 挂载短评（评论流/条目评论）。
@@ -32,23 +31,23 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 			where = append(where, enabledBoardGuard("t"))
 		}
 		// entity_id 必须是合法 UUID，否则直接判为空结果，而不是把非法字面量送进查询。
-		// X01：按 canonical 汇别名——读请求 ID 的评论要含 canonical 行（AliasSet），
-		// 新写已归一 canonical，历史别名行靠集合覆盖（反向全枚举待目录契约）。
+		// X01：按全量别名集合过滤——新写已归一 canonical，历史别名行靠集合覆盖
+		// （展开点见 catalog.ResolveAliasSet，反向全枚举待目录契约）。
 		if raw := strings.TrimSpace(c.Query("entity_id")); raw != "" {
 			if _, err := uuid.Parse(raw); err != nil {
 				c.JSON(200, gin.H{"items": []any{}})
 				return
 			}
-			canonical, err := h.catalog.ResolveCanonical(c.Request.Context(), raw)
+			_, set, err := h.catalog.ResolveAliasSet(c.Request.Context(), raw)
 			if err != nil {
 				failUpstream(c)
 				return
 			}
-			if canonical == "" {
+			if len(set) == 0 {
 				c.JSON(200, gin.H{"items": []any{}})
 				return
 			}
-			args = append(args, pq.Array(catalog.AliasSet(canonical, raw)))
+			args = append(args, pq.Array(set))
 			where = append(where, fmt.Sprintf("t.entity_id = ANY($%d::uuid[])", len(args)))
 		}
 		// q 需同时匹配正文与条目标题，而标题不属本 schema、无法在 SQL 内完成；
@@ -136,16 +135,16 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 	// URL 契约沿用 /community/entities/:id/posts，前端无需改动。
 	api.GET("/community/entities/:id/posts", h.guard(false), func(c *gin.Context) {
 		id := c.Param("id")
-		canonical, ok := h.canonicalEntity(c, id)
+		// X01：可见性确认 + 全量别名集合一次拿齐（新写已归一 canonical，历史别名行靠集合覆盖）。
+		_, set, ok := h.aliasSet(c, id)
 		if !ok {
 			return
 		}
-		// X01：按 canonical 汇别名读取（新写已归一 canonical，历史别名行靠集合覆盖）。
 		query := `SELECT id::text,author_id::text,COALESCE(NULLIF(author_name, ''), 'Anonymous'),body,created_at FROM community.topics t WHERE t.board_code=$1 AND t.entity_id = ANY($2::uuid[])`
 		if !h.seesDisabledBoards(c) {
 			query += " AND " + enabledBoardGuard("t")
 		}
-		rows, err := h.db.QueryContext(c.Request.Context(), query+" ORDER BY created_at DESC LIMIT 100", commentBoard, pq.Array(catalog.AliasSet(canonical, id)))
+		rows, err := h.db.QueryContext(c.Request.Context(), query+" ORDER BY created_at DESC LIMIT 100", commentBoard, pq.Array(set))
 		if err != nil {
 			fail(c, 500, "module_error")
 			return
@@ -300,10 +299,12 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 	// 关联合集：经目录接口取关系邻居，不直接 JOIN 目录表（解耦边界）。
 	api.GET("/community/entities/:id/collections", h.guard(false), func(c *gin.Context) {
 		id := c.Param("id")
-		if !h.entity(c, id) {
+		// X01：关联查询按 canonical 取邻居，合并别名 A 的关联合集在存活 B 页同样可见。
+		canonical, ok := h.canonicalEntity(c, id)
+		if !ok {
 			return
 		}
-		cols, err := h.catalog.Related(c.Request.Context(), id, []string{"collection"})
+		cols, err := h.catalog.Related(c.Request.Context(), canonical, []string{"collection"})
 		if err != nil {
 			// 上游不可用：不能回空 items —— "没有关联合集"与"取不到关联合集"是两件事。
 			failUpstream(c)

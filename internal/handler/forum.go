@@ -16,7 +16,6 @@ import (
 
 	"github.com/MoeclubM/metafusion-community/internal/audit"
 	"github.com/MoeclubM/metafusion-community/internal/auth"
-	"github.com/MoeclubM/metafusion-community/internal/catalog"
 )
 
 // 论坛是本站自建的独立讨论系统：板块（board）→ 主题（topic）→ 回复（post）。
@@ -344,16 +343,17 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 				c.JSON(200, gin.H{"items": []any{}, "total": 0})
 				return
 			}
-			canonical, err := h.catalog.ResolveCanonical(c.Request.Context(), raw)
+			// X01：按全量别名集合过滤（展开点见 catalog.ResolveAliasSet，反向全枚举待目录契约）。
+			_, set, err := h.catalog.ResolveAliasSet(c.Request.Context(), raw)
 			if err != nil {
 				failUpstream(c)
 				return
 			}
-			if canonical == "" {
+			if len(set) == 0 {
 				c.JSON(200, gin.H{"items": []any{}, "total": 0})
 				return
 			}
-			args = append(args, pq.Array(catalog.AliasSet(canonical, raw)))
+			args = append(args, pq.Array(set))
 			where = append(where, fmt.Sprintf("t.entity_id = ANY($%d::uuid[])", len(args)))
 		}
 		// 标签筛选按名称或 id 命中关联表。

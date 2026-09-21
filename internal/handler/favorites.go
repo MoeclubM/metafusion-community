@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MoeclubM/metafusion-community/internal/audit"
+	"github.com/MoeclubM/metafusion-community/internal/catalog"
 	"github.com/MoeclubM/metafusion-community/internal/store"
 )
 
@@ -35,18 +36,21 @@ func (h *Handler) registerFavorites(api *gin.RouterGroup) {
 		// 收藏到不可见条目会让"谁收藏了什么"泄露编辑中的条目。
 		// 取不到目录是 503（依赖故障），不是 404：把自己的故障说成"目标不存在"，
 		// 用户会以为条目被删了，运维在监控里也看不到这次故障。
-		entity, err := h.catalog.Lookup(c.Request.Context(), strings.TrimSpace(in.TargetID))
+		requested := strings.TrimSpace(in.TargetID)
+		// X01：身份契约给 canonical + 前向历史别名；新写归一 canonical，切换按集合收敛——
+		// 经历史别名切换时前向链上的旧行一并收敛，不再与归一新行并存。
+		// X01-compat：经存活身份切换时历史行不可枚举（待目录反向契约），仅覆盖 {存活 + 请求 ID}。
+		v, err := h.catalog.Identity(c.Request.Context(), requested)
 		if err != nil {
 			failUpstream(c)
 			return
 		}
-		if entity.ID == "" || entity.Kind != targetType {
+		if v.CanonicalID == "" || v.Entity.Kind != targetType {
 			fail(c, 404, "not_found")
 			return
 		}
-		// X01：Lookup 已跟随 /resolve，entity.ID 即 canonical；新写归一 canonical。
-		targetID := entity.ID
-		favorited, err := h.store.ToggleFavorite(c.Request.Context(), h.principal(c).ID, targetType, targetID)
+		targetID := v.CanonicalID
+		favorited, err := h.store.ToggleFavoriteSet(c.Request.Context(), h.principal(c).ID, targetType, targetID, catalog.AliasSet(targetID, append(v.Aliases, requested)...))
 		if err != nil {
 			fail(c, 500, "module_error")
 			return
@@ -73,7 +77,8 @@ func (h *Handler) registerFavorites(api *gin.RouterGroup) {
 				ids = append(ids, id)
 			}
 		}
-		// X01：按 canonical 查状态（请求别名 A 归一到 B 后查 B，再映射回请求 ID）。
+		// X01：按别名集合查状态——请求 ID 展开为 {canonical + 历史别名} 后查库，
+		// 集合内任一行命中即视为已收藏：合并前落在历史别名上的收藏不再显示为未收藏。
 		// 非法 UUID 直接视为未收藏：送进 uuid 列只会拿到 pq 解析错误（旧实现曾 500 回显）。
 		valid := []string{}
 		for _, id := range ids {
@@ -81,20 +86,29 @@ func (h *Handler) registerFavorites(api *gin.RouterGroup) {
 				valid = append(valid, id)
 			}
 		}
-		resolved, err := h.catalog.ResolveMany(c.Request.Context(), valid)
+		resolutions, err := h.catalog.IdentityMany(c.Request.Context(), valid)
 		if err != nil {
 			failUpstream(c)
 			return
 		}
-		canonicals := []string{}
+		expanded := map[string][]string{}
+		union := []string{}
 		seen := map[string]bool{}
-		for _, id := range ids {
-			if canonical := resolved[id]; canonical != "" && !seen[canonical] {
-				seen[canonical] = true
-				canonicals = append(canonicals, canonical)
+		for _, id := range valid {
+			v, ok := resolutions[id]
+			if !ok || v.CanonicalID == "" {
+				continue
+			}
+			set := catalog.AliasSet(v.CanonicalID, append(v.Aliases, id)...)
+			expanded[id] = set
+			for _, alias := range set {
+				if !seen[alias] {
+					seen[alias] = true
+					union = append(union, alias)
+				}
 			}
 		}
-		v, err := h.store.FavoriteStatus(c.Request.Context(), p.ID, c.Query("target_type"), canonicals)
+		v, err := h.store.FavoriteStatus(c.Request.Context(), p.ID, c.Query("target_type"), union)
 		if err != nil {
 			fail(c, storeErrorStatus(err), storeErrorCode(err))
 			return
@@ -105,8 +119,11 @@ func (h *Handler) registerFavorites(api *gin.RouterGroup) {
 		}
 		out := []string{}
 		for _, id := range ids {
-			if canonical := resolved[id]; canonical != "" && hit[canonical] {
-				out = append(out, id)
+			for _, alias := range expanded[id] {
+				if hit[alias] {
+					out = append(out, id)
+					break
+				}
 			}
 		}
 		c.JSON(200, gin.H{"favorited": out})
@@ -160,6 +177,7 @@ func (h *Handler) respondFavorites(c *gin.Context, ownerID, targetType string, l
 		return
 	}
 	out := []map[string]any{}
+	seenCanonical := map[string]bool{}
 	for _, f := range items {
 		raw, err := h.catalog.LookupRaw(c.Request.Context(), f.TargetID)
 		if err != nil {
@@ -172,6 +190,19 @@ func (h *Handler) respondFavorites(c *gin.Context, ownerID, targetType string, l
 			continue // 目标不可见/已删除：跳过，不清空记录
 		}
 		var entity json.RawMessage = raw
+		// X01：按归一后身份去重——LookupRaw 已跟随合并重定向，历史行（A）与归一新行（B）
+		// 透传出同一实体，只保留第一条；total 仍是库内行数（遗留重复在下一次切换时收敛）。
+		dedupeKey := f.TargetID
+		var resolved struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &resolved); err == nil && resolved.ID != "" {
+			dedupeKey = resolved.ID
+		}
+		if seenCanonical[dedupeKey] {
+			continue
+		}
+		seenCanonical[dedupeKey] = true
 		out = append(out, map[string]any{
 			"id":          f.ID,
 			"target_type": f.TargetType,
