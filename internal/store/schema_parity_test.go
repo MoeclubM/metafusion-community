@@ -140,8 +140,9 @@ var frozenOwnTableDefs = map[string]map[string]string{
 		"reviewed_at":    "reviewed_at timestamptz",
 		"created_at":     "created_at timestamptz not null default now()",
 	},
-	// 必须送达通知的待投递表（000011，X02）：event_id 唯一做幂等，状态机 pending→sent/
-	// failed/expired，过期与次数耗尽不再自动重试（由管理端查询与重放）。
+	// 必须送达通知的待投递表（000011 建表、000012 改幂等键）：幂等键是 (收件人, 事件)
+	// （同一业务事件通知多人时各存一行），状态机 pending→sent/failed/expired，
+	// 过期与次数耗尽不再自动重试（由管理端查询与重放）。
 	"community.notification_outbox": {
 		"id":            "id uuid primary key",
 		"recipient_id":  "recipient_id uuid not null",
@@ -149,7 +150,7 @@ var frozenOwnTableDefs = map[string]map[string]string{
 		"subject_type":  "subject_type text not null",
 		"subject_id":    "subject_id text not null",
 		"dedupe_key":    "dedupe_key text not null",
-		"event_id":      "event_id text not null unique",
+		"event_id":      "event_id text not null",
 		"payload":       "payload jsonb not null default '{}'::jsonb",
 		"status":        "status text not null default 'pending' check(status in ('pending','sent','failed','expired'))",
 		"attempts":      "attempts int not null default 0",
@@ -172,17 +173,18 @@ var frozenOwnTableDefs = map[string]map[string]string{
 // 与上面那条同理：列顺序或方向被改动，查询会从"索引倒序扫描"退化成"全表扫 + 排序"，
 // 而编译、vet 与真库用例（表太小，看不出计划差异）都不会失败。
 var frozenOwnIndexes = map[string]string{
-	"direct_messages_conversation": "community.direct_messages (least(sender_id,recipient_id), greatest(sender_id,recipient_id), created_at desc, id desc)",
-	"direct_messages_inbox":        "community.direct_messages (recipient_id, sender_id, created_at desc, id desc)",
-	"direct_messages_outbox":       "community.direct_messages (sender_id, recipient_id, created_at desc, id desc)",
-	"reports_queue":                "community.reports (status, created_at desc, id desc)",
-	"reports_target":               "community.reports (target_type, target_id)",
-	"reports_reporter":             "community.reports (reporter_id, created_at desc)",
-	"report_events_report":         "community.report_events (report_id, at, id)",
-	"report_appeals_queue":         "community.report_appeals (status, created_at desc, id desc)",
-	"notification_outbox_due":        "community.notification_outbox (status, next_retry_at, id)",
-	"notification_outbox_recipient":  "community.notification_outbox (recipient_id, created_at desc, id desc)",
-	"notification_outbox_dedupe":     "community.notification_outbox (dedupe_key)",
+	"direct_messages_conversation":        "community.direct_messages (least(sender_id,recipient_id), greatest(sender_id,recipient_id), created_at desc, id desc)",
+	"direct_messages_inbox":               "community.direct_messages (recipient_id, sender_id, created_at desc, id desc)",
+	"direct_messages_outbox":              "community.direct_messages (sender_id, recipient_id, created_at desc, id desc)",
+	"reports_queue":                       "community.reports (status, created_at desc, id desc)",
+	"reports_target":                      "community.reports (target_type, target_id)",
+	"reports_reporter":                    "community.reports (reporter_id, created_at desc)",
+	"report_events_report":                "community.report_events (report_id, at, id)",
+	"report_appeals_queue":                "community.report_appeals (status, created_at desc, id desc)",
+	"notification_outbox_due":             "community.notification_outbox (status, next_retry_at, id)",
+	"notification_outbox_recipient":       "community.notification_outbox (recipient_id, created_at desc, id desc)",
+	"notification_outbox_dedupe":          "community.notification_outbox (dedupe_key)",
+	"notification_outbox_recipient_event": "community.notification_outbox (recipient_id, event_id)",
 }
 
 var (
@@ -195,10 +197,14 @@ var (
 	// 000006 起有 DROP TABLE：整张表被删掉后不能再出现在终态里，否则"迁移文件已经删了的表"
 	// 仍会被结构测试当成存在（冻结清单里也就永远删不掉它）。
 	dropTableRe = regexp.MustCompile(`(?is)^\s*drop table if exists\s+([a-z_.]+)\s*$`)
-	// CREATE INDEX IF NOT EXISTS 名称 ON 表 (表达式清单)：索引同样要进结构测试，
+	// CREATE [UNIQUE] INDEX IF NOT EXISTS 名称 ON 表 (表达式清单)：索引同样要进结构测试，
 	// 否则删掉一条索引不会有任何用例失败（会话查询会安静地退化成全表扫描）。
 	// 列清单里允许嵌套括号（LEAST(...)/GREATEST(...)），所以一路取到语句末尾的右括号。
-	createIndexRe = regexp.MustCompile(`(?is)^\s*create index if not exists\s+([a-z_][a-z0-9_]*)\s+on\s+([a-z_.]+)\s*\((.*)\)\s*$`)
+	createIndexRe = regexp.MustCompile(`(?is)^\s*create\s+(?:unique\s+)?index if not exists\s+([a-z_][a-z0-9_]*)\s+on\s+([a-z_.]+)\s*\((.*)\)\s*$`)
+	// ALTER TABLE [IF EXISTS] 表 DROP CONSTRAINT [IF EXISTS] 约束名：000012 用它
+	// 撤销 event_id 单列唯一（解析到该语句时把冻结清单里 event_id 的 unique 后缀去掉，
+	// 否则“测试看到的库”永远停在 000011 的形状上）。
+	alterDropConstraintRe = regexp.MustCompile(`(?is)^\s*alter table\s+(?:if exists\s+)?([a-z_.]+)\s+drop constraint(?:\s+if exists)?\s+([a-z_][a-z0-9_]*)\s*$`)
 	// DO $$ ... $$; 块里是带条件的回填/守卫逻辑，不是结构声明：先整体剥掉再按分号切语句
 	// （块内的分号会让简单的切分器把一条语句切成几段）。
 	doBlockRe = regexp.MustCompile(`(?is)do\s+\$\$.*?\$\$\s*;`)
@@ -251,6 +257,18 @@ func parseSchema(t *testing.T, ddl string) map[string]map[string]string {
 	t.Helper()
 	out := map[string]map[string]string{}
 	for _, stmt := range splitTopLevel(doBlockRe.ReplaceAllString(stripLineComments(ddl), ""), ";") {
+		if m := alterDropConstraintRe.FindStringSubmatch(stmt); m != nil {
+			table := strings.ToLower(strings.TrimSpace(m[1]))
+			name := strings.ToLower(strings.TrimSpace(m[2]))
+			if table == "community.notification_outbox" && name == "notification_outbox_event_id_key" {
+				if cols, ok := out[table]; ok {
+					if def, ok := cols["event_id"]; ok {
+						cols["event_id"] = strings.TrimSuffix(def, " unique")
+					}
+				}
+			}
+			continue
+		}
 		if m := alterAddRe.FindStringSubmatch(stmt); m != nil {
 			if cols, ok := out[strings.ToLower(strings.TrimSpace(m[1]))]; ok {
 				cols[m[2]] = normalizeDef(m[2] + " " + m[3])
