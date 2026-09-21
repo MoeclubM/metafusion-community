@@ -101,6 +101,24 @@ func main() {
 
 	h := handler.New(db, cat, verifier)
 	h.Register(r)
+	// S4 常驻 worker：待投递表（community.notification_outbox）的自动领取与重试。
+	// worker 模式归本服务（同一进程一个 goroutine + 定时触发），不拆新服务、
+	// 不引入消息中间件；领取用行锁 + 租约，多副本同时跑不会长期重复投递
+	// （见 store.ClaimDueOutbox）。关掉后只有管理端手动重试能投递。
+	if cfg.OutboxWorkerEnabled {
+		interval := cfg.OutboxWorkerInterval
+		if interval <= 0 {
+			interval = 30 * time.Second
+		}
+		batch := cfg.OutboxWorkerBatch
+		if batch <= 0 || batch > 200 {
+			batch = 50
+		}
+		log.Printf("community outbox worker is enabled (every %s, batch %d)", interval, batch)
+		go runOutboxWorker(ctx, h, interval, batch)
+	} else {
+		log.Print("community outbox worker is disabled (COMMUNITY_OUTBOX_WORKER_ENABLED=0): due notifications only deliver via POST /api/community/admin/notifications/outbox/retry")
+	}
 	// 退出时排空审计队列：defer 在 http.Server.Shutdown 之后执行（在途请求都已收尾），
 	// 此时关闭不会丢行；defer 顺序在 db.Close() 之前，队列排空时连接还在。
 	defer h.Close()
@@ -168,5 +186,28 @@ func main() {
 			return
 		}
 		log.Fatalf("server error: %v", err)
+	}
+}
+
+// runOutboxWorker 是常驻投递循环：每次触发做一轮“过期 → 领取 → 逐条投递”。
+// 投递失败只记行状态（退避/过期/终态见 store），触发本身不带业务语义；
+// 空轮不打日志（30s 一轮的空日志会淹没真实请求日志），有动作或出错才记一行。
+func runOutboxWorker(ctx context.Context, h *handler.Handler, interval time.Duration, batch int) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			res, err := h.RetryDueOutbox(context.Background(), batch)
+			if err != nil {
+				log.Printf("community outbox worker round failed: %v", err)
+				continue
+			}
+			if res.Retried > 0 || res.Expired > 0 {
+				log.Printf("community outbox worker round: retried=%d sent=%d expired=%d", res.Retried, res.Sent, res.Expired)
+			}
+		}
 	}
 }

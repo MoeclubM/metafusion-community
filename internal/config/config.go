@@ -33,6 +33,14 @@ type Config struct {
 	// 留空 = 通知投递关闭：评论/回帖照常成功，只是不产生通知（部署态，不是故障）。
 	// 它只用于 POST /api/notifications/internal，不进日志、不出现在任何响应里。
 	InternalAPIToken string
+	// OutboxWorkerEnabled 是待投递表常驻 worker 的开关：本服务进程内起一个 goroutine
+	// 按 OutboxWorkerInterval 触发 RetryDueOutbox（S4）。关掉后只有管理端手动重试能投递
+	// （排障/演练用，生产保持开启）。worker 归本服务，不拆新服务、不引入消息中间件。
+	OutboxWorkerEnabled bool
+	// OutboxWorkerInterval 是 worker 两次触发的间隔。
+	OutboxWorkerInterval time.Duration
+	// OutboxWorkerBatch 是 worker 单次领取的上限（与管理端手动重试的 50 同档）。
+	OutboxWorkerBatch int
 	// TrustedProxies 是应用层信任的反向代理范围（TRUSTED_PROXIES，逗号分隔的 IP/CIDR）。
 	// 留空 = 只信回环 + RFC1918 私网（网关容器所在网段），none = 入口链上没有代理。
 	// 解析与生效在启动时由 nettrust.Apply 完成：非法项直接拒绝启动，不退化成"谁都不信"
@@ -42,17 +50,20 @@ type Config struct {
 
 func Load() Config {
 	c := Config{
-		Port:             env("PORT", "8083"),
-		DatabaseURL:      env("DATABASE_URL", ""),
-		JWKSURL:          env("COMMUNITY_JWKS_URL", "http://auth:8081/api/oidc/jwks"),
-		JWTPublicKeyPEM:  env("AUTH_JWT_PUBLIC_KEY", ""),
-		JWTIssuer:        env("AUTH_JWT_ISSUER", "https://findverse.cc/api"),
-		JWTAudience:      env("AUTH_JWT_AUDIENCE", "metafusion"),
-		AuthURL:          env("AUTH_URL", ""),
-		CatalogURL:       env("CATALOG_URL", "http://backend:8080"),
-		CatalogTimeout:   time.Duration(envInt("COMMUNITY_CATALOG_TIMEOUT_MS", 5000)) * time.Millisecond,
-		InternalAPIToken: strings.TrimSpace(os.Getenv("INTERNAL_API_TOKEN")),
-		TrustedProxies:   env(nettrust.EnvVar, ""), // TRUSTED_PROXIES：留空即 nettrust 的保守默认
+		Port:                 env("PORT", "8083"),
+		DatabaseURL:          env("DATABASE_URL", ""),
+		JWKSURL:              env("COMMUNITY_JWKS_URL", "http://auth:8081/api/oidc/jwks"),
+		JWTPublicKeyPEM:      env("AUTH_JWT_PUBLIC_KEY", ""),
+		JWTIssuer:            env("AUTH_JWT_ISSUER", "https://findverse.cc/api"),
+		JWTAudience:          env("AUTH_JWT_AUDIENCE", "metafusion"),
+		AuthURL:              env("AUTH_URL", ""),
+		CatalogURL:           env("CATALOG_URL", "http://backend:8080"),
+		CatalogTimeout:       time.Duration(envInt("COMMUNITY_CATALOG_TIMEOUT_MS", 5000)) * time.Millisecond,
+		InternalAPIToken:     strings.TrimSpace(os.Getenv("INTERNAL_API_TOKEN")),
+		OutboxWorkerEnabled:  envBool("COMMUNITY_OUTBOX_WORKER_ENABLED", true),
+		OutboxWorkerInterval: time.Duration(envInt("COMMUNITY_OUTBOX_WORKER_INTERVAL_MS", 30000)) * time.Millisecond,
+		OutboxWorkerBatch:    envInt("COMMUNITY_OUTBOX_WORKER_BATCH", 50),
+		TrustedProxies:       env(nettrust.EnvVar, ""), // TRUSTED_PROXIES：留空即 nettrust 的保守默认
 	}
 	if c.DatabaseURL == "" {
 		c.DatabaseURL = buildDSN()
@@ -80,6 +91,21 @@ func env(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// envBool 读开关量："0"/"false"/"no"/"off" 为关（大小写不敏感，前后空白忽略），
+// 空值取默认值，其它值一律为开——开关写错字时偏向“保持投递”，而不是静默停掉 worker。
+func envBool(k string, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(k)))
+	if v == "" {
+		return def
+	}
+	switch v {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 func envInt(k string, def int) int {
