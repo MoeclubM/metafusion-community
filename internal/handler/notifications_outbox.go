@@ -98,13 +98,12 @@ func (h *Handler) RetryDueOutbox(ctx context.Context, limit int) (OutboxRetryRes
 }
 
 // enqueueTopicReply 在回帖事务内为定向收件人入队（S4 必须送达的唯一产生端）：
-// 收件人 = 被回复楼层作者 → 主题作者（去掉操作者本人，去重后最多两人），
-// 载荷与 notifyTopicReply 的尽力投递同形（topic_reply）；同一事件各收件人各存一行
-// （(recipient_id, event_id) 复合幂等，见 migrations/000012）。
-//
+// 约束：收件人 = 被回复楼层作者 → 主题作者（去掉操作者本人，去重后最多两人）；
+// 同一事件各收件人各存一行（(收件人, 事件) 复合幂等），EventID 取 postID 且每次投递原样携带；
+// ActorID/ActorName 是原始作者快照，随业务事务落库，不存令牌。
 // 调用方在回帖事务提交前调它：入队失败返回 err，调用方让回帖一起回滚。
-// 返回的 items（含预生成的行 ID）供提交后立即试投（deliverOutboxItem 按 ID 置终态）。
-func (h *Handler) enqueueTopicReply(ctx context.Context, tx *sql.Tx, actorID, topicID, postID string, replyTo *int, topicAuthor, topicTitle, topicEntity, body string) ([]store.OutboxItem, error) {
+// 返回的 items（含预生成的行 ID）供提交后领取试投（claimOutboxAndDeliver 按租约置终态）。
+func (h *Handler) enqueueTopicReply(ctx context.Context, tx *sql.Tx, actorID, actorName, topicID, postID string, replyTo *int, topicAuthor, topicTitle, topicEntity, body string) ([]store.OutboxItem, error) {
 	repliedTo := ""
 	if replyTo != nil {
 		_ = tx.QueryRowContext(ctx,
@@ -148,6 +147,8 @@ func (h *Handler) enqueueTopicReply(ctx context.Context, tx *sql.Tx, actorID, to
 			SubjectID:   topicID,
 			DedupeKey:   "comment.replied:topic:" + topicID,
 			EventID:     postID,
+			ActorID:     actorID,
+			ActorName:   actorName,
 			Payload:     payload,
 		}
 		if _, err := h.store.EnqueueNotificationTx(ctx, tx, item, now); err != nil {
@@ -159,17 +160,20 @@ func (h *Handler) enqueueTopicReply(ctx context.Context, tx *sql.Tx, actorID, to
 }
 
 // deliverOutboxItem 投递单条待投递行：成功置 sent，失败记 attempts/退避/错误。
+// 约束：以受限服务身份投递（不转发调用者凭据），作者只取行内快照，重试不改作者；
 // 未配置投递密钥（ErrNotConfigured）是部署态：不计失败、不推退避，留待配置后下次触发。
 func (h *Handler) deliverOutboxItem(ctx context.Context, item store.OutboxItem) bool {
 	deliverCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	err := h.catalog.Notify(deliverCtx, catalog.Notification{
+	err := h.catalog.NotifyService(deliverCtx, catalog.Notification{
 		RecipientID: item.RecipientID,
 		Type:        item.Type,
 		SubjectType: item.SubjectType,
 		SubjectID:   item.SubjectID,
 		DedupeKey:   item.DedupeKey,
 		EventID:     item.EventID,
+		ActorID:     item.ActorID,
+		ActorName:   item.ActorName,
 		Payload:     item.Payload,
 	})
 	now := time.Now()
@@ -182,4 +186,15 @@ func (h *Handler) deliverOutboxItem(ctx context.Context, item store.OutboxItem) 
 	}
 	_ = h.store.MarkOutboxAttempt(ctx, item.ID, err.Error(), now)
 	return false
+}
+
+// claimOutboxAndDeliver 按 ID 领取后投递（立即投递与后台投递共用领取约定）。
+// 约束：同一事件只投递一次，未领到的一方必须跳过（另一方会投递）。
+func (h *Handler) claimOutboxAndDeliver(ctx context.Context, item store.OutboxItem) bool {
+	now := time.Now()
+	claimed, err := h.store.ClaimOutboxByIDs(ctx, []string{item.ID}, now, outboxClaimLease)
+	if err != nil || len(claimed) == 0 {
+		return false
+	}
+	return h.deliverOutboxItem(ctx, claimed[0])
 }

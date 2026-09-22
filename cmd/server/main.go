@@ -190,6 +190,7 @@ func main() {
 }
 
 // runOutboxWorker 是常驻投递循环：每次触发做一轮“过期 → 领取 → 逐条投递”。
+// 约束：以受限服务身份投递（context.Background 无用户凭据，作者取行内快照，不存令牌）；
 // 投递失败只记行状态（退避/过期/终态见 store），触发本身不带业务语义；
 // 空轮不打日志（30s 一轮的空日志会淹没真实请求日志），有动作或出错才记一行。
 func runOutboxWorker(ctx context.Context, h *handler.Handler, interval time.Duration, batch int) {

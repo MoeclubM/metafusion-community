@@ -22,9 +22,8 @@ import (
 //     跨服务投递会被目录侧以 invalid_notification_type 拒收；结论经报告行 + report_events
 //     同事务落库，经举报/申诉队列与审计留痕（见 store/reports.go 的 withTx），目录加类型后再接。
 //
-// 并发重试的重复投递由目录侧按 (收件人, dedupe_key, last_event_id) 去重兜底
-// （见 catalog/notify.go 的 EventID）。不引入 Kafka：量级与语义用本库表即够，
-// 失败查询与手动重试走管理端点。
+// 并发重试的重复投递由目录侧收据表按 (收件人, 事件) 去重兜底（见 catalog/notify.go 的 EventID）。
+// 不引入 Kafka：量级与语义用本库表即够，失败查询与手动重试走管理端点。
 const (
 	OutboxPending = "pending"
 	OutboxSent    = "sent"
@@ -39,6 +38,8 @@ const (
 
 // OutboxItem 是一条待投递记录。Payload 只做透传（目录侧按通知类型解析），
 // 本服务不解释它——解释权在收件箱（目录）那边。
+// 约束：EventID 是同一业务事件在重试/立即/后台路径间的稳定身份，每次投递必须原样携带；
+// ActorID/ActorName 是产生端已确认的原始作者快照，随业务事务落库，不存用户令牌。
 type OutboxItem struct {
 	ID          string         `json:"id"`
 	RecipientID string         `json:"recipient_id"`
@@ -47,6 +48,8 @@ type OutboxItem struct {
 	SubjectID   string         `json:"subject_id"`
 	DedupeKey   string         `json:"dedupe_key"`
 	EventID     string         `json:"event_id"`
+	ActorID     string         `json:"actor_id"`
+	ActorName   string         `json:"actor_name"`
 	Payload     map[string]any `json:"payload"`
 	Status      string         `json:"status"`
 	Attempts    int            `json:"attempts"`
@@ -109,12 +112,12 @@ func enqueueOutbox(ctx context.Context, db outboxExec, item OutboxItem, now time
 		raw = []byte("{}")
 	}
 	res, err := db.ExecContext(ctx, `INSERT INTO community.notification_outbox(
-			id,recipient_id,type,subject_type,subject_id,dedupe_key,event_id,payload,
+			id,recipient_id,type,subject_type,subject_id,dedupe_key,event_id,actor_id,actor_name,payload,
 			status,attempts,next_retry_at,expires_at,created_at,updated_at)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,'pending',0,$9,$10,$9,$9)
+			VALUES($1,$2,$3,$4,$5,$6,$7,NULLIF($8,'')::uuid,$9,$10::jsonb,'pending',0,$11,$12,$11,$11)
 			ON CONFLICT (recipient_id, event_id) DO NOTHING`,
 		item.ID, item.RecipientID, item.Type, item.SubjectType, item.SubjectID,
-		item.DedupeKey, item.EventID, string(raw), now, item.ExpiresAt)
+		item.DedupeKey, item.EventID, item.ActorID, item.ActorName, string(raw), now, item.ExpiresAt)
 	if err != nil {
 		return false, err
 	}
@@ -122,13 +125,13 @@ func enqueueOutbox(ctx context.Context, db outboxExec, item OutboxItem, now time
 	return n > 0, nil
 }
 
-const outboxColumns = `id::text,recipient_id::text,type,subject_type,subject_id,dedupe_key,event_id,payload,status,attempts,next_retry_at,expires_at,last_error,created_at,updated_at`
+const outboxColumns = `id::text,recipient_id::text,type,subject_type,subject_id,dedupe_key,event_id,COALESCE(actor_id::text,''),actor_name,payload,status,attempts,next_retry_at,expires_at,last_error,created_at,updated_at`
 
 func scanOutbox(scanner interface{ Scan(...any) error }) (OutboxItem, error) {
 	var it OutboxItem
 	var raw []byte
 	if err := scanner.Scan(&it.ID, &it.RecipientID, &it.Type, &it.SubjectType, &it.SubjectID,
-		&it.DedupeKey, &it.EventID, &raw, &it.Status, &it.Attempts,
+		&it.DedupeKey, &it.EventID, &it.ActorID, &it.ActorName, &raw, &it.Status, &it.Attempts,
 		&it.NextRetryAt, &it.ExpiresAt, &it.LastError, &it.CreatedAt, &it.UpdatedAt); err != nil {
 		return OutboxItem{}, err
 	}
@@ -183,6 +186,70 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, now time.Time, limit int, le
 	out := []OutboxItem{}
 	claimed, err := tx.QueryContext(ctx, `UPDATE community.notification_outbox
 		SET next_retry_at=$1, updated_at=$1 WHERE id = ANY($2::uuid[]) RETURNING `+outboxColumns, now.Add(lease), pq.Array(ids))
+	if err != nil {
+		return nil, err
+	}
+	for claimed.Next() {
+		it, err := scanOutbox(claimed)
+		if err != nil {
+			claimed.Close()
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	claimed.Close()
+	if err := claimed.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ClaimOutboxByIDs 按 ID 原子领取指定行（立即投递与后台投递共用领取约定）：
+// 约束：仅 pending 且未被租约占住（next_retry_at<=now）的行可被领走，领走即推后租期；
+// 同一事件只投递一次，未领到的一方必须跳过投递（另一方会投递）。
+func (s *Store) ClaimOutboxByIDs(ctx context.Context, ids []string, now time.Time, lease time.Duration) ([]OutboxItem, error) {
+	if len(ids) == 0 {
+		return []OutboxItem{}, nil
+	}
+	if lease <= 0 {
+		lease = 5 * time.Minute
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM community.notification_outbox
+		WHERE id = ANY($2::uuid[]) AND status='pending' AND next_retry_at <= $1 AND expires_at > $1
+		FOR UPDATE SKIP LOCKED`, now, pq.Array(ids))
+	if err != nil {
+		return nil, err
+	}
+	claimedIDs := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		claimedIDs = append(claimedIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(claimedIDs) == 0 {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return []OutboxItem{}, nil
+	}
+	out := []OutboxItem{}
+	claimed, err := tx.QueryContext(ctx, `UPDATE community.notification_outbox
+		SET next_retry_at=$1, updated_at=$1 WHERE id = ANY($2::uuid[]) RETURNING `+outboxColumns, now.Add(lease), pq.Array(claimedIDs))
 	if err != nil {
 		return nil, err
 	}

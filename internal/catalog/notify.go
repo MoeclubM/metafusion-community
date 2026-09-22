@@ -15,8 +15,8 @@
 //  3. 未配置密钥时**不发也不报错**（ErrNotConfigured 是部署态）：把评论功能
 //     押在"通知密钥配没配"上是不对的。
 //
-// 鉴权是双凭据：X-Internal-Token 证明"这是受信任服务生成的"，Authorization 里的
-// 终端用户令牌提供 actor（目录侧据此写审计行与"谁回复了你"）。
+// 鉴权是受限服务身份：X-Internal-Token 证明"这是受信任服务生成的"，不转发用户令牌；
+// 约束：actor 以产生端确认的事件数据为准（actor_id/actor_name 随业务事务落库），后台与管理员重试不取调用者身份。
 package catalog
 
 import (
@@ -37,6 +37,8 @@ const InternalTokenHeader = "X-Internal-Token"
 const NotificationCommentReplied = "comment.replied"
 
 // Notification 是投递体，字段与目录侧 POST /api/notifications/internal 的请求体逐字对应。
+// 约束：同一业务事件的每次投递必须携带相同 EventID（重试/立即/后台路径共用）；
+// ActorID/ActorName 是产生端已确认的原始作者快照，目录侧收据表按 (收件人, 事件) 判重时不改作者。
 type Notification struct {
 	RecipientID string         `json:"recipient_id"`
 	Type        string         `json:"type"`
@@ -46,11 +48,12 @@ type Notification struct {
 	// DedupeKey 决定聚合：同一收件人同一键只保留一行（count 累加）。
 	// 评论回复按"被回复的落点"聚合（同一主题的多条回复是一行 + count）。
 	DedupeKey string `json:"dedupe_key"`
-	// EventID 让上游重试幂等（目录侧按它判"同一事件"）：传新建回复/评论的 id。
-	// 同一业务事件通知多人时各收件人共用同一个 EventID（论坛回帖的 post id）：
-	// 本服务待投递表的幂等键是 (收件人, 事件) 复合（000012），目录侧按
-	// (收件人, dedupe_key, last_event_id) 去重，两边都不把“多人”误判成“重复”。
+	// EventID 是稳定事件身份：传新建回复/评论的 id，同一事件通知多人时各收件人共用同一个。
+	// 约束：同一事件的每次投递必须相同；目录侧收据表按 (收件人, 事件) 去重，领取语义为同一事件只投递一次。
 	EventID string `json:"event_id"`
+	// ActorID 是原始作者（产生端确认，不取调用者身份）；ActorName 是写入时的展示快照。
+	ActorID   string `json:"actor_id"`
+	ActorName string `json:"actor_name"`
 }
 
 // notifyPolicy 是**尽力而为**的写投递策略：比读路径（3 次尝试 / 7s 预算）更短。
@@ -86,7 +89,8 @@ func (c *Client) NotificationsConfigured() bool {
 	return c != nil && c.base != "" && c.internalToken != ""
 }
 
-// Notify 投递一条通知。err != nil 只表示"这次没送达"，不代表事件没发生。
+// Notify 投递一条通知（尽力路径：实体短评参与式广播）。err != nil 只表示"这次没送达"，不代表事件没发生。
+// 约束：调用者凭据仍随 ctx 转发（目录侧旧契约按令牌取 actor）；必须送达路径改用 NotifyService。
 func (c *Client) Notify(ctx context.Context, msg Notification) error {
 	if c == nil || c.base == "" || c.internalToken == "" {
 		return ErrNotConfigured
@@ -111,6 +115,36 @@ func (c *Client) Notify(ctx context.Context, msg Notification) error {
 	if resp.StatusCode != http.StatusOK {
 		// 非 200 一律按"上游不可用"上报（含 401 invalid_internal_token 与 503 internal_api_disabled）：
 		// 前者是密钥配错、后者是目录侧没配，都属于部署问题，不该被静默吞掉。
+		return upstreamError(c.up.Name(), statusReason(resp.StatusCode), resp.StatusCode, nil)
+	}
+	return nil
+}
+
+// NotifyService 以受限服务身份投递必须送达通知（待投递表路径）。
+// 约束：不转发调用者凭据（ctx 中的令牌被忽略），作者只取 msg.ActorID/ActorName（产生端落库快照）；
+// 后台 worker 与管理员重试因此不改作者，用户退出后仍可送达；无用户令牌不延长寿命。
+func (c *Client) NotifyService(ctx context.Context, msg Notification) error {
+	if c == nil || c.base == "" || c.internalToken == "" {
+		return ErrNotConfigured
+	}
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	header := http.Header{}
+	header.Set(InternalTokenHeader, c.internalToken)
+	header.Set("Content-Type", "application/json")
+	resp, err := c.notify.Do(ctx, upstream.Request{
+		Method: http.MethodPost,
+		URL:    c.base + "/api/notifications/internal",
+		Header: header,
+		Body:   raw,
+	})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
 		return upstreamError(c.up.Name(), statusReason(resp.StatusCode), resp.StatusCode, nil)
 	}
 	return nil

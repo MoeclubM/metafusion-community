@@ -140,7 +140,7 @@ var frozenOwnTableDefs = map[string]map[string]string{
 		"reviewed_at":    "reviewed_at timestamptz",
 		"created_at":     "created_at timestamptz not null default now()",
 	},
-	// 必须送达通知的待投递表（000011 建表、000012 改幂等键）：幂等键是 (收件人, 事件)
+	// 必须送达通知的待投递表（000011 建表、000012 改幂等键、000013 加作者快照）：幂等键是 (收件人, 事件)
 	// （同一业务事件通知多人时各存一行），状态机 pending→sent/failed/expired，
 	// 过期与次数耗尽不再自动重试（由管理端查询与重放）。
 	"community.notification_outbox": {
@@ -151,6 +151,8 @@ var frozenOwnTableDefs = map[string]map[string]string{
 		"subject_id":    "subject_id text not null",
 		"dedupe_key":    "dedupe_key text not null",
 		"event_id":      "event_id text not null",
+		"actor_id":      "actor_id uuid",
+		"actor_name":    "actor_name text not null default ''",
 		"payload":       "payload jsonb not null default '{}'::jsonb",
 		"status":        "status text not null default 'pending' check(status in ('pending','sent','failed','expired'))",
 		"attempts":      "attempts int not null default 0",

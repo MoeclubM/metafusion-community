@@ -681,7 +681,8 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 		// S4 必须送达：收件人 = 被回复楼层作者 → 主题作者（去掉自己，去重后最多两人，
 		// 同一事件各收件人各存一行）。入队与回帖同事务：入队失败则回帖一起回滚，
 		// 不出现“回帖成功、通知凭空消失”的半截状态。
-		pending, enqueueErr := h.enqueueTopicReply(c.Request.Context(), tx, p.ID, topicID, pid, replyTo, topicAuthor, topicTitle, topicEntity, content)
+		// 约束：作者快照随事务落库（不存令牌），EventID 取 postID 且每次投递原样携带。
+		pending, enqueueErr := h.enqueueTopicReply(c.Request.Context(), tx, p.ID, authorName(p), topicID, pid, replyTo, topicAuthor, topicTitle, topicEntity, content)
 		if enqueueErr != nil {
 			fail(c, 500, "module_error")
 			return
@@ -696,11 +697,11 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			changes["reply_to_post_number"] = *replyTo
 		}
 		audit.Describe(c, audit.Detail{TargetType: "post", TargetID: pid, Changes: changes})
-		// 入队后立即试投一次（与 worker 同一投递函数，成功即置 sent）：首试成功时收件人
-		// 无须等 worker 周期；失败的行仍是 pending，worker 按退避重试。
+		// 入队后领取试投一次（与 worker 共用领取约定，同一事件只投递一次）：首试成功时收件人
+		// 无须等 worker 周期；未领到（worker 已领走）则跳过，失败的行仍是 pending 按退避重试。
 		// 实体短评的参与式广播不在这里（见 notifications.go）：那是尽力投递。
 		for _, item := range pending {
-			h.deliverOutboxItem(c.Request.Context(), item)
+			h.claimOutboxAndDeliver(c.Request.Context(), item)
 		}
 		c.JSON(200, gin.H{
 			"id": pid, "topic_id": topicID, "user_id": p.ID, "author_name": authorName(p),
