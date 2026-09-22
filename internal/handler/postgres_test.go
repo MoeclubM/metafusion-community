@@ -48,6 +48,19 @@ func TestForumEndpointsAgainstPostgres(t *testing.T) {
 	// 目录桩：实体一律可见，标题固定，用来验证"跨服务取标题"这条链路。
 	entityID := uuid.NewString()
 	catalogStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/identity") {
+			// X01 身份契约：按路径里的请求 ID 原样回答存活身份（canonical=请求 ID，无别名），
+			// 投影保持可见 published。桩若回实体 JSON，会被客户端按“200 却无 canonical_id”
+			// 的契约漂移判上游不可用（见 catalog.Identity），实体锚定写会连带 503。
+			seg := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			id := seg[len(seg)-2]
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"canonical_id": id,
+				"aliases":      []any{},
+				"entity":       map[string]any{"id": id, "kind": "work", "title": "测试作品", "status": "published"},
+			})
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/relations") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "entities": map[string]any{}})
 			return

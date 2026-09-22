@@ -21,8 +21,9 @@ import (
 )
 
 // 需要真实 PostgreSQL：验证"后台分配的权限组"在本服务真的生效 —— 持 community.post.moderate
-// 的成员可处置他人的主题与短评，只有 community.post.create 的成员不行，而**老令牌**
-// （claims 里没有 permissions）仍按角色兜底（admin 可治理）。未设置 COMMUNITY_TEST_DSN 时跳过。
+// 的成员可处置他人的主题与短评，只有 community.post.create 的成员不行；**老令牌**
+// （claims 里没有 permissions）只有发帖码兜底，治理类码 S01 起不再设 admin 兜底
+// （见 auth.permission.go 的 legacyOpenCodes）。未设置 COMMUNITY_TEST_DSN 时跳过。
 func TestModerationEndpointsHonourPermissionCodes(t *testing.T) {
 	dsn := testutil.DSN(t)
 	db := testutil.Database(t)
@@ -47,6 +48,19 @@ func TestModerationEndpointsHonourPermissionCodes(t *testing.T) {
 
 	entityID := uuid.NewString()
 	catalogStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/identity") {
+			// X01 身份契约：按路径里的请求 ID 原样回答存活身份（canonical=请求 ID，无别名），
+			// 投影保持可见 published。桩若回实体 JSON，会被客户端按“200 却无 canonical_id”
+			// 的契约漂移判上游不可用（见 catalog.Identity），实体锚定写会连带 503。
+			seg := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			id := seg[len(seg)-2]
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"canonical_id": id,
+				"aliases":      []any{},
+				"entity":       map[string]any{"id": id, "kind": "work", "title": "测试作品", "status": "published"},
+			})
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/relations") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "entities": map[string]any{}})
 			return
@@ -123,10 +137,14 @@ func TestModerationEndpointsHonourPermissionCodes(t *testing.T) {
 		t.Fatal("持治理码的删除请求未生效")
 	}
 
-	// 3) 老令牌（没有 permissions 声明）按角色兜底：admin 仍可治理。
+	// 3) 老令牌（没有 permissions 声明）只有发帖兜底：S01 起治理码不再设 admin 兜底，
+	// admin 删他人主题与无码成员同一口径（404，不泄露存在性），主题必须还在。
 	legacyTopic := newTopic()
-	if w := call(http.MethodDelete, "/api/community/topics/"+legacyTopic, "", legacyAdminToken); w.Code != 200 {
-		t.Fatalf("老令牌 admin 删他人主题应 200，实际 %d（%s）", w.Code, w.Body.String())
+	if w := call(http.MethodDelete, "/api/community/topics/"+legacyTopic, "", legacyAdminToken); w.Code != 404 {
+		t.Fatalf("老令牌 admin 无治理码删他人主题应 404，实际 %d（%s）", w.Code, w.Body.String())
+	}
+	if !topicExists(legacyTopic) {
+		t.Fatal("无治理码的删除请求不应真的删掉主题")
 	}
 
 	newComment := func() string {
