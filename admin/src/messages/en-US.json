@@ -1,6 +1,8 @@
 {
   "admin.appTitle": "Community Admin",
   "admin.appSubtitle": "Boards, topics and post moderation",
+  "admin.backToHub": "Admin center",
+  "admin.navLabel": "Community administration",
   "admin.serviceLabel": "Service community-admin",
   "admin.footer": "Operations console shipped with the community service: gateway path /admin/community, port 3000, health at /admin/community/api/health.",
   "admin.localeLabel": "Interface language",

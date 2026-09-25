@@ -1,6 +1,8 @@
 {
   "admin.appTitle": "互動服務後台",
   "admin.appSubtitle": "看板、主題與貼文治理",
+  "admin.backToHub": "管理中心",
+  "admin.navLabel": "互動後台導覽",
   "admin.serviceLabel": "服務 community-admin",
   "admin.footer": "互動服務自帶的營運後台：閘道路徑 /admin/community，連接埠 3000，健康端點 /admin/community/api/health。",
   "admin.localeLabel": "介面語言",

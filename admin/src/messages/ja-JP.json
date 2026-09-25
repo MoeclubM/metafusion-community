@@ -1,6 +1,8 @@
 {
   "admin.appTitle": "コミュニティ管理",
   "admin.appSubtitle": "ボード・トピック・投稿の管理",
+  "admin.backToHub": "管理センター",
+  "admin.navLabel": "コミュニティ管理ナビゲーション",
   "admin.serviceLabel": "サービス community-admin",
   "admin.footer": "コミュニティサービス同梱の運用コンソール：ゲートウェイ配下は /admin/community、ポート 3000、ヘルスは /admin/community/api/health。",
   "admin.localeLabel": "表示言語",

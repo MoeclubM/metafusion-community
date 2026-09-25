@@ -1,6 +1,8 @@
 {
   "admin.appTitle": "互动服务后台",
   "admin.appSubtitle": "板块、主题与帖子治理",
+  "admin.backToHub": "管理中心",
+  "admin.navLabel": "互动后台导航",
   "admin.serviceLabel": "服务 community-admin",
   "admin.footer": "互动服务自带的运营后台：网关路径 /admin/community，端口 3000，健康端点 /admin/community/api/health。",
   "admin.localeLabel": "界面语言",
