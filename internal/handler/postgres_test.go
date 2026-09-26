@@ -77,7 +77,7 @@ func TestForumEndpointsAgainstPostgres(t *testing.T) {
 	verifier := newVerifier(t, srv.URL)
 	router := gin.New()
 	New(s, catalog.New(catalogStub.URL, 2*time.Second), verifier).Register(router)
-	token := signToken(t, key, kid, "editor")
+	token := signTokenWith(t, key, kid, testSubject, "editor", nil, []string{"community.post.create"})
 
 	call := func(method, path, body, bearer string) (*httptest.ResponseRecorder, map[string]any) {
 		t.Helper()

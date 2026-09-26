@@ -234,9 +234,9 @@ func TestPostCreateRequiresPermissionCode(t *testing.T) {
 		}
 	}
 
-	// 3) 老令牌（没有 permissions）沿用"登录即可发帖"的历史边界，不能因为收口而断掉。
-	if w = opsCall(t, router, http.MethodPost, "/api/community/topics", `{"board_code":"qa","title":"老令牌发帖","content":"正文"}`, legacyToken); w.Code != 200 {
-		t.Fatalf("老令牌发主题应 200，实际 %d（%s）", w.Code, w.Body.String())
+	// 3) 没有权限声明的令牌不能绕过发帖权限。
+	if w = opsCall(t, router, http.MethodPost, "/api/community/topics", `{"board_code":"qa","title":"无权限发帖","content":"正文"}`, legacyToken); w.Code != 403 {
+		t.Fatalf("无权限令牌发主题应 403，实际 %d（%s）", w.Code, w.Body.String())
 	}
 
 	// 4) 匿名：401（鉴权先于权限判定）。

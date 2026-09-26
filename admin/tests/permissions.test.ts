@@ -29,20 +29,19 @@ test("带码但角色是 admin 时不再按角色放行（避免角色兜底变�
   assert.equal(can(adminWithOneCode, COMMUNITY_TOPIC_PIN), false);
 });
 
-test("没有 permissions 声明的老令牌按历史边界兜底", () => {
+test("没有 permissions 声明的令牌无管理权限", () => {
   const legacyAdmin = { role: "admin", permissions: [] };
-  assert.equal(can(legacyAdmin, COMMUNITY_BOARD_MANAGE), true);
-  assert.equal(can(legacyAdmin, COMMUNITY_TOPIC_PIN), true);
-  assert.equal(can(legacyAdmin, COMMUNITY_POST_MODERATE), true);
+  assert.equal(can(legacyAdmin, COMMUNITY_BOARD_MANAGE), false);
+  assert.equal(can(legacyAdmin, COMMUNITY_TOPIC_PIN), false);
+  assert.equal(can(legacyAdmin, COMMUNITY_POST_MODERATE), false);
 
   const legacyMember = { role: "user", permissions: [] };
-  // 发帖码在老令牌下"登录即可"（服务端 legacyOpenCodes），治理码只认 admin。
-  assert.equal(can(legacyMember, COMMUNITY_POST_CREATE), true);
+  assert.equal(can(legacyMember, COMMUNITY_POST_CREATE), false);
   assert.equal(can(legacyMember, COMMUNITY_POST_MODERATE), false);
   assert.equal(can(legacyMember, COMMUNITY_BOARD_MANAGE), false);
 
   const legacyEditor = { role: "editor", permissions: null };
-  assert.equal(can(legacyEditor, COMMUNITY_POST_CREATE), true);
+  assert.equal(can(legacyEditor, COMMUNITY_POST_CREATE), false);
   assert.equal(can(legacyEditor, COMMUNITY_POST_MODERATE), false);
 });
 
