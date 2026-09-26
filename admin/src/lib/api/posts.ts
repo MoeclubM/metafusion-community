@@ -53,12 +53,13 @@ export function deleteReply(topicId: string, postId: string): Promise<void> {
 /**
  * 实体短评（评论板块）：走既有的 /api/community/feed —— 短评存在 community.topics 里，
  * 不在治理列表端点覆盖的 community.posts 内，两者不是同一张表。
- * feed 只有 limit（没有 total/offset），因此这里固定取最近一页。
+ * feed 没有 total，因此这里固定取第一页。
  */
 export function fetchComments(q: string, limit: number): Promise<CommentRow[]> {
   const query = new URLSearchParams();
   if (q && q.trim() !== "") query.set("q", q.trim());
-  query.set("limit", String(limit));
+  query.set("page", "1");
+  query.set("page_size", String(limit));
   query.set("sort", "recent");
   return fetchApi<{ items?: CommentRow[] }>("/api/community/feed?" + query.toString()).then((raw) => {
     return Array.isArray(raw?.items) ? raw.items : [];

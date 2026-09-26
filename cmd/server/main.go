@@ -66,17 +66,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("token verifier initialization failed: %v", err)
 	}
-	// 存量兜底：浏览器可能还持有登录时的不透明会话令牌（非 JWT）。身份只能问账号服务，
-	// 因此兜底指向 AUTH_URL；未配置时退化为"只接受 JWT"（fail closed），不会静默放行。
 	// PAT（mfp_ 前缀）走内省端点 POST /api/auth/tokens/introspect，结果进程内缓存 60 秒
 	// （= 吊销窗口），见 internal/auth/pat.go。内省器无论 AUTH_URL 是否配置都注入：
 	// 未配置时它 Enabled()==false，带 mfp_ 的请求一律 503 auth_unavailable（与不注入同一条路径），
 	// 同时它也是 /ready?deep=1 探账号服务的执行器。
 	pat := auth.NewPATIntrospector(cfg.AuthURL)
 	verifier.SetPAT(pat)
-	if cfg.AuthURL != "" {
-		verifier.SetFallback(auth.NewSessionClient(cfg.AuthURL))
-	} else {
+	if cfg.AuthURL == "" {
 		log.Print("AUTH_URL is not configured: personal access tokens (mfp_ prefix) will be rejected with 503 auth_unavailable")
 	}
 

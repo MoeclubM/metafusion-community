@@ -13,9 +13,6 @@ export interface BoardRow {
   code: string;
   names: Record<string, string>;
   descriptions: Record<string, string>;
-  /** 兼容/回退单值列：由 names 的 zh-CN 派生，只读展示，没有写入口。 */
-  name: string;
-  description: string;
   color: string;
   icon: string;
   sort_order: number;
@@ -129,7 +126,7 @@ export function patchFieldNames(patch: BoardPatch): string[] {
   return Object.keys(patch);
 }
 
-/** 展示回退链：请求语言 → en-US → zh-CN → 任意非空 → fallback；单值列只作兜底。 */
+/** 展示回退链：请求语言 → en-US → zh-CN → 任意非空 → fallback。 */
 export function boardText(
   values: Record<string, string> | undefined,
   locale: string,
@@ -153,8 +150,6 @@ export function boardMatchesQuery(row: BoardRow, query: string): boolean {
   if (!needle) return true;
   const haystack = [
     row.code,
-    row.name,
-    row.description,
     ...Object.values(row.names ?? {}),
     ...Object.values(row.descriptions ?? {}),
   ];

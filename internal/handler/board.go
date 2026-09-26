@@ -21,11 +21,7 @@ import (
 // 只改传入字段：调用方想单独切 show_in_feed 或 is_enabled 时不必回传整份配置，
 // 也就不会因为漏带某个字段而把它清空。
 //
-// 名称与描述**只收多语言 map**，不收单值 name/description：单值列是容量层的兼容/回退列，
-// 由多语言 map 派生（见 upsertBoardLocales），不给它一条反向定义多语言值的写入口——
-// 那等于在接口层把语言维度又装回来，与"接口去语言维度、字段保留"的决议相悖。
-// 旧客户端只传 {"name":...} 会被当成空载荷 400，这是有意的：gin 忽略未知字段，静默接受
-// 只会写出一个说不清语种的板块名。
+// 名称与描述只收多语言 map，不收单值 name/description。
 
 // resolveBoardLocales 规范化传入的语种 map：逐语裁剪空白，四语齐备才算通过，
 // 缺语种返回与目录侧同名的错误码（four_locale_names_required: 缺的语种），
@@ -61,38 +57,18 @@ func resolveBoardLocales(locales map[string]string) (map[string]string, string) 
 	return nil, "four_locale_names_required: " + strings.Join(missing, ",")
 }
 
-// addLocaleUpdate 写入多语言列，并把单值兼容列同步成聚合值。
-//
-// 同步方向只有一个：多语言 map → 单值列。单值列的值取 zh-CN（缺则第一个有值的语种），
-// 因此"库里单值列非空但 names 为空"这种只有 000002 之后的旧实例才有的状态不会再现。
+// addLocaleUpdate 写入多语言列。
 // 允许 value 为空 map：那是显式清空（description/descriptions 不是板块身份）。
 //
 // 语种 map 编成 JSON 文本再经 ::jsonb 转换：lib/pq 不认 map 类型。编码不可能失败
 // （map 的键值都是 string），这里用 encodeLocales 的返回值兜底只是为了不吞掉错误。
-func addLocaleUpdate(set *[]string, args *[]any, column, derive string, value map[string]string) {
+func addLocaleUpdate(set *[]string, args *[]any, column string, value map[string]string) {
 	encoded, err := encodeLocales(value)
 	if err != nil {
 		encoded = "{}"
 	}
 	*args = append(*args, encoded)
 	*set = append(*set, fmt.Sprintf("%s=$%d::jsonb", column, len(*args)))
-	if derive != "" {
-		*args = append(*args, aggregateLocale(value))
-		*set = append(*set, fmt.Sprintf("%s=$%d", derive, len(*args)))
-	}
-}
-
-// aggregateLocale 把多语言 map 收敛成一个回退单值：zh-CN 优先，缺失时按语种清单取第一个非空值。
-func aggregateLocale(value map[string]string) string {
-	if v := strings.TrimSpace(value["zh-CN"]); v != "" {
-		return v
-	}
-	for _, locale := range boardLocales {
-		if v := strings.TrimSpace(value[locale]); v != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 func (h *Handler) registerBoards(api *gin.RouterGroup) {
@@ -127,7 +103,7 @@ func (h *Handler) registerBoards(api *gin.RouterGroup) {
 				fail(c, 400, "invalid_payload")
 				return
 			}
-			addLocaleUpdate(&set, &args, "names", "name", names)
+			addLocaleUpdate(&set, &args, "names", names)
 		}
 		// 描述不是身份：允许四语全传空串来清空（严格四语校验由 resolveBoardLocales 负责）。
 		if in.Descriptions != nil {
@@ -136,7 +112,7 @@ func (h *Handler) registerBoards(api *gin.RouterGroup) {
 				fail(c, 400, errCode)
 				return
 			}
-			addLocaleUpdate(&set, &args, "descriptions", "description", descriptions)
+			addLocaleUpdate(&set, &args, "descriptions", descriptions)
 		}
 		// 空串的颜色/图标会把前端渲染成无样式：按非法值拒掉，而不是静默写坏展示。
 		if in.Color != nil {
@@ -233,7 +209,7 @@ func (h *Handler) registerBoards(api *gin.RouterGroup) {
 func scanBoardRow(scan func(...any) error) (forumBoard, error) {
 	var b forumBoard
 	var names, descriptions string
-	if err := scan(&b.Code, &names, &descriptions, &b.Name, &b.Description, &b.Color, &b.Icon, &b.SortOrder, &b.IsEnabled, &b.ShowInFeed); err != nil {
+	if err := scan(&b.Code, &names, &descriptions, &b.Color, &b.Icon, &b.SortOrder, &b.IsEnabled, &b.ShowInFeed); err != nil {
 		return forumBoard{}, err
 	}
 	var err error

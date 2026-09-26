@@ -107,8 +107,8 @@ export function BoardsPanel({ reloadKey }: { reloadKey: number }) {
                   <tr key={row.code} className="hover:bg-white/5">
                     <td className={CELL_CLASS + " font-mono text-[11px]"}>{row.code}</td>
                     <td className={CELL_CLASS}>
-                      <span className="block text-ink">{boardText(row.names, locale, row.name)}</span>
-                      <span className="block text-[11px] text-muted">{boardText(row.descriptions, locale, row.description)}</span>
+                      <span className="block text-ink">{boardText(row.names, locale, row.code)}</span>
+                      <span className="block text-[11px] text-muted">{boardText(row.descriptions, locale)}</span>
                     </td>
                     <td className={CELL_CLASS}>
                       <span className="inline-flex items-center gap-2">

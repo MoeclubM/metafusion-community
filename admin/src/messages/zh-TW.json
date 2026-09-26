@@ -249,4 +249,9 @@
   "admin.err.contentStillPresent": "內容還在：請先用既有刪除入口把它下線，再記錄「內容已下線」。",
   "admin.err.enforcementNotSupported": "該處置結論不適用於這個對象（實體 / 資源 / 使用者的動作歸各自的服務）。",
   "admin.err.noteRequired": "這個動作必須填寫說明。",
-  "admin.err.notRemovable": "該對象不在互動服務裡，不能從這裡下線。" }
+  "admin.err.notRemovable": "該對象不在互動服務裡，不能從這裡下線。",
+  "admin.theme.modeLabel": "外觀",
+  "admin.theme.dark": "深色",
+  "admin.theme.light": "淺色",
+  "admin.theme.system": "跟隨系統"
+}

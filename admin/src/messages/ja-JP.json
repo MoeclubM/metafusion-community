@@ -249,4 +249,9 @@
   "admin.err.contentStillPresent": "コンテンツがまだ存在します。既存の削除入口で削除してから記録してください。",
   "admin.err.enforcementNotSupported": "この結論は対象に適用できません（実体・リソース・ユーザーは各サービスが担当）。",
   "admin.err.noteRequired": "この操作には説明が必要です。",
-  "admin.err.notRemovable": "このサービスでは削除できません。" }
+  "admin.err.notRemovable": "このサービスでは削除できません。",
+  "admin.theme.modeLabel": "外観",
+  "admin.theme.dark": "ダーク",
+  "admin.theme.light": "ライト",
+  "admin.theme.system": "システム"
+}

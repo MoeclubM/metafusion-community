@@ -4,7 +4,7 @@
 //
 // 权限：置顶要 community.topic.pin，删他人的主题要 community.post.moderate；
 // 作者删自己的主题不需要码（服务端口径），所以按钮可见性按"持有码 或 是本人"判断。
-// 分页用 limit/offset——这是 /api/community/topics 的口径（服务端 paging.go 的兼容期说明）。
+// 分页用 page/page_size，与 /api/community/topics 的接口一致。
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useI18n } from "@/lib/i18n/provider";
@@ -71,8 +71,7 @@ export function TopicsPanel({ reloadKey }: { reloadKey: number }) {
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    const offset = (page - 1) * TOPIC_PAGE_SIZE;
-    fetchTopics({ boardCode, q: query, limit: TOPIC_PAGE_SIZE, offset })
+		fetchTopics({ boardCode, q: query, page, pageSize: TOPIC_PAGE_SIZE })
       .then((data) => {
         if (!alive) return;
         setItems(data.items);
@@ -162,7 +161,7 @@ export function TopicsPanel({ reloadKey }: { reloadKey: number }) {
                 <option value="all">{t("admin.topics.allBoards")}</option>
                 {boards.map((board) => (
                   <option key={board.code} value={board.code}>
-                    {board.code + " · " + boardText(board.names, locale, board.name)}
+                    {board.code + " · " + boardText(board.names, locale, board.code)}
                   </option>
                 ))}
               </Select>

@@ -22,7 +22,11 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 	// 条目元信息经目录接口批量获取，不直接 JOIN 目录表（解耦边界）。
 	// 支持 sort=recent（默认，最新在前）/ oldest；entity_id 限定单个条目；q 匹配正文或条目标题。
 	api.GET("/community/feed", h.guard(false), func(c *gin.Context) {
-		limit, _ := pagingLimitOffset(c, 50)
+		if legacyPaging(c) {
+			fail(c, 400, "invalid_query_param")
+			return
+		}
+		limit, offset := pagingPageSize(c, 50)
 		args := []any{commentBoard}
 		where := []string{"t.board_code = $1"}
 		// 评论板块被停用时，评论流同样不再公开（持 community.board.manage 的运营仍可见，
@@ -62,13 +66,21 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 			order = "ASC"
 		}
 		args = append(args, scan)
+		limitPlaceholder := strconv.Itoa(len(args))
+		if q == "" {
+			args = append(args, offset)
+		}
+		pagination := ""
+		if q == "" {
+			pagination = " OFFSET $" + strconv.Itoa(len(args))
+		}
 		rows, err := h.db.QueryContext(c.Request.Context(), `
 			SELECT t.id::text, t.entity_id::text, t.author_id::text,
 			       COALESCE(NULLIF(t.author_name, ''), 'Anonymous'), t.body, t.created_at
 			FROM community.topics t
 			WHERE `+strings.Join(where, " AND ")+`
 			ORDER BY t.created_at `+order+`, t.id
-			LIMIT $`+strconv.Itoa(len(args)), args...)
+			LIMIT $`+limitPlaceholder+pagination, args...)
 		if err != nil {
 			fail(c, 500, "module_error")
 			return
@@ -104,6 +116,7 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 		}
 		needle := strings.ToLower(q)
 		items := []map[string]any{}
+		matched := 0
 		for _, r := range raw {
 			title, kind := "", ""
 			if r.entityID != "" {
@@ -117,6 +130,12 @@ func (h *Handler) registerCommunity(api *gin.RouterGroup) {
 				!strings.Contains(strings.ToLower(r.body), needle) &&
 				!strings.Contains(strings.ToLower(title), needle) {
 				continue
+			}
+			if q != "" {
+				matched++
+				if matched <= offset {
+					continue
+				}
 			}
 			items = append(items, map[string]any{
 				"id": r.id, "entity_id": r.entityID, "author_id": r.authorID,

@@ -249,4 +249,9 @@
   "admin.err.contentStillPresent": "The content is still present: remove it via the existing delete entry first.",
   "admin.err.enforcementNotSupported": "This conclusion does not apply to this target.",
   "admin.err.noteRequired": "A note is required for this action.",
-  "admin.err.notRemovable": "This item is not hosted in the community service and cannot be removed here." }
+  "admin.err.notRemovable": "This item is not hosted in the community service and cannot be removed here.",
+  "admin.theme.modeLabel": "Appearance",
+  "admin.theme.dark": "Dark",
+  "admin.theme.light": "Light",
+  "admin.theme.system": "System"
+}

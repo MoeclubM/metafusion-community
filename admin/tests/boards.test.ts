@@ -21,8 +21,6 @@ function row(overrides: Partial<BoardRow> = {}): BoardRow {
     code: "announcement",
     names: { ...full },
     descriptions: { "zh-CN": "描述", "zh-TW": "描述", "ja-JP": "説明", "en-US": "Description" },
-    name: "公告",
-    description: "描述",
     color: "amber",
     icon: "Megaphone",
     sort_order: 10,
@@ -76,7 +74,7 @@ test("补丁只带改动过的字段，空白差异不算改动", () => {
   assert.equal(patch.show_in_feed, undefined);
 });
 
-test("展示回退链：请求语言 → en-US → zh-CN → 任意非空 → 单值列兜底", () => {
+test("展示回退链：请求语言 → en-US → zh-CN → 任意非空 → 显式兜底", () => {
   assert.equal(boardText(full, "ja-JP"), "お知らせ");
   assert.equal(boardText({ "en-US": "News" }, "ja-JP"), "News");
   assert.equal(boardText({ "zh-CN": "公告" }, "ja-JP"), "公告");

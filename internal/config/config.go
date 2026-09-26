@@ -22,8 +22,7 @@ type Config struct {
 	JWTPublicKeyPEM string
 	JWTIssuer       string
 	JWTAudience     string
-	// AuthURL 账号服务地址，仅用于存量不透明会话令牌的兜底解析（GET /api/auth/me）。
-	// 留空即"只接受 JWT"：身份问题只问账号服务，不查任何人的库。
+	// AuthURL 账号服务地址，用于 PAT 内省及健康探针。会话 JWT 在本地验签。
 	AuthURL string
 	// CatalogURL 元数据目录地址：实体可见性与标题一律问它，本服务不复制目录数据。
 	CatalogURL string

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n/provider";
 import { localeLabels, locales, type Locale } from "@/lib/i18n/routing";
 import { useSession } from "@/lib/session-context";
@@ -12,6 +12,7 @@ import { TopicsPanel } from "./TopicsPanel";
 import { PostsPanel } from "./PostsPanel";
 import { ReportsPanel } from "./ReportsPanel";
 import { Button, Card, Notice } from "./ui";
+import { ThemeModeSwitcher } from "./ThemeModeSwitcher";
 
 type TabId = "boards" | "topics" | "posts" | "reports";
 const TABS: { id: TabId; labelKey: string; codes: string[] }[] = [
@@ -27,7 +28,7 @@ function readHash(): string {
 }
 
 export function AppShell() {
-  const { t, locale, setLocale } = useI18n();
+  const { t, locale } = useI18n();
   const { status, user, error, reload, can } = useSession();
   const [tab, setTab] = useState<TabId | "">("");
   const [reloadKey, setReloadKey] = useState(0);
@@ -67,26 +68,22 @@ export function AppShell() {
 
   return (
     <div className="flex min-h-screen flex-col bg-surface text-ink">
-      <header className="sticky top-0 z-30 border-b border-line bg-surface/95 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3 px-4 py-3 sm:px-6">
-          <div className="min-w-0">
-            <h1 className="text-base font-semibold text-ink">{t("admin.appTitle")}</h1>
-            <p className="text-xs text-muted">{t("admin.appSubtitle")}</p>
+      <header className="sticky top-0 z-30 border-b border-line bg-panel/95 backdrop-blur">
+        <div className="mx-auto flex h-14 w-full max-w-[80rem] items-center justify-between gap-3 px-4 sm:px-6">
+          <div className="flex min-w-0 items-center gap-3">
+            <a href="/admin" className="inline-flex shrink-0 items-center gap-1 text-xs text-muted hover:text-ink"><span aria-hidden="true">←</span>{t("admin.backToHub")}</a>
+            <span className="text-muted">/</span>
+            <h1 className="min-w-0 truncate text-sm font-semibold text-ink">{t("admin.appTitle")}</h1>
           </div>
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-2 text-xs text-muted">
-              <span className="sr-only sm:not-sr-only">{t("admin.localeLabel")}</span>
-              <select value={locale} onChange={(e) => setLocale(e.target.value as Locale)} className="rounded-lg border border-line bg-surface px-2 py-2 text-xs text-ink focus:border-accent focus:outline-none">
-                {locales.map((code) => <option key={code} value={code}>{localeLabels[code]}</option>)}
-              </select>
-            </label>
-            <a href="/admin" className="rounded-lg border border-line px-3 py-2 text-xs text-ink hover:bg-accent/10">{t("admin.backToHub")}</a>
-            <Button type="button" onClick={refreshAll} disabled={status === "loading"}>{t("admin.refresh")}</Button>
+          <div className="flex shrink-0 items-center gap-2">
+            <LocaleMenu />
+            <ThemeModeSwitcher />
+            {user ? <span className="hidden max-w-[9rem] truncate rounded border border-accent/30 bg-accent/15 px-2 py-0.5 font-mono text-xs text-accent sm:inline-flex" title={user.username}>{user.username}</span> : null}
           </div>
         </div>
       </header>
 
-      <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-6 sm:px-6 lg:flex-row">
+      <div className="mx-auto flex w-full max-w-[80rem] flex-1 flex-col gap-6 px-4 py-6 sm:px-6 lg:flex-row">
         {status === "ready" && anyAllowed ? (
           <aside className="w-full shrink-0 lg:w-52">
             <div className="rounded-xl border border-line bg-surface p-3 lg:hidden">
@@ -106,10 +103,11 @@ export function AppShell() {
         ) : null}
 
         <main className="min-w-0 flex-1 space-y-4">
+          {status === "ready" ? <div className="flex justify-end"><Button type="button" onClick={refreshAll}>{t("admin.refresh")}</Button></div> : null}
           {status === "ready" && user ? (
             <details className="rounded-xl border border-line bg-surface px-4 py-3 text-xs">
               <summary className="cursor-pointer font-medium text-ink">
-                {t("admin.session.title")} · {user.display_name || user.username} · {user.role || t("admin.unknown")}
+                {t("admin.session.title")} · {user.display_name || user.username}
               </summary>
               <dl className="mt-3 grid gap-3 border-t border-line pt-3 sm:grid-cols-2">
                 <div><dt className="text-muted">{t("admin.session.labelGroups")}</dt><dd className="mt-1 text-ink">{(user.groups ?? []).join(", ") || t("admin.session.groupsNone")}</dd></div>
@@ -140,7 +138,27 @@ export function AppShell() {
           {status === "ready" && anyAllowed && tab === "reports" && allowed.reports ? <ReportsPanel reloadKey={reloadKey} /> : null}
         </main>
       </div>
-      <footer className="mx-auto w-full max-w-6xl border-t border-line px-4 py-4 text-[11px] leading-relaxed text-muted sm:px-6">{t("admin.footer")}</footer>
+      <footer className="mx-auto w-full max-w-[80rem] border-t border-line px-4 py-4 text-[11px] leading-relaxed text-muted sm:px-6">{t("admin.footer")}</footer>
     </div>
   );
+}
+
+function LocaleMenu() {
+  const { t, locale, setLocale } = useI18n();
+  const [open, setOpen] = useState(false);
+  const container = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (event: MouseEvent) => { if (!container.current?.contains(event.target as Node)) setOpen(false); };
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onPointer); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+  return <div className="relative" ref={container}>
+    <button type="button" aria-label={t("admin.localeLabel")} title={t("admin.localeLabel")} aria-expanded={open} aria-haspopup="menu" onClick={() => setOpen(!open)} className="grid h-9 w-9 place-items-center rounded-full border border-line bg-panel text-ink hover:border-accent"><span aria-hidden="true">文</span></button>
+    {open ? <div role="menu" aria-label={t("admin.localeLabel")} className="absolute right-0 z-50 mt-2 w-44 rounded-xl border border-line bg-panel p-1.5 shadow-xl">
+      {locales.map((code) => <button key={code} type="button" role="menuitemradio" aria-checked={locale === code} onClick={() => { setLocale(code as Locale); setOpen(false); }} className={"flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs hover:bg-accent/10 " + (locale === code ? "font-semibold text-accent" : "text-ink")}>{localeLabels[code]}{locale === code ? "✓" : null}</button>)}
+    </div> : null}
+  </div>;
 }

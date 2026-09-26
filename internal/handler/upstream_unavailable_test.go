@@ -83,6 +83,7 @@ func TestCatalogNotFoundStaysNotFound(t *testing.T) {
 
 	missing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not_found"}`))
 	}))
 	defer missing.Close()
 

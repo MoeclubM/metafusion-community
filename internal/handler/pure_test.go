@@ -110,14 +110,4 @@ func TestResolveBoardLocalesRequiresFourLocales(t *testing.T) {
 	if emptied, code := resolveBoardLocales(map[string]string{"zh-CN": "", "zh-TW": "", "ja-JP": "", "en-US": ""}); code != "" || len(emptied) != 0 {
 		t.Fatalf("四语全空应判为清空：%v / %s", emptied, code)
 	}
-	// 单值列的回退值固定取 zh-CN，缺中文键时按语种清单取第一个非空值，绝不返回空串以外的猜测。
-	if derived := aggregateLocale(map[string]string{"zh-CN": "问答", "en-US": "Q&A"}); derived != "问答" {
-		t.Fatalf("aggregateLocale = %q，期望 zh-CN 的值", derived)
-	}
-	if derived := aggregateLocale(map[string]string{"en-US": "Q&A"}); derived != "Q&A" {
-		t.Fatalf("缺中文键时 aggregateLocale = %q，期望回退到第一个非空语种", derived)
-	}
-	if derived := aggregateLocale(map[string]string{}); derived != "" {
-		t.Fatalf("空 map 的 aggregateLocale = %q，期望空串", derived)
-	}
 }

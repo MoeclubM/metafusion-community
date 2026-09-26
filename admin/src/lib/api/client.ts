@@ -66,9 +66,9 @@ async function requestTokenRefresh(): Promise<string | null> {
         clearAuthTokens();
         return null;
       }
-      const data = (await res.json()) as { access_token?: string; token?: string; refresh_token?: string };
-      const token = data.access_token || data.token || null;
-      if (token) setAuthTokens(token, data.refresh_token);
+      const data = (await res.json()) as { access_token?: string };
+      const token = data.access_token || null;
+      if (token) setAuthTokens(token);
       else clearAuthTokens();
       return token;
     } catch {

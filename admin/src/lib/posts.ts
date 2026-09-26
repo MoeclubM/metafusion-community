@@ -1,7 +1,7 @@
 // 帖子（短评与楼中回复）的纯逻辑：两类内容的响应解析。
 // 契约来源：
 //   internal/handler/community.go:23-108 —— /community/feed 返回 {items:[{id,entity_id,author_id,
-//     author_name,body,created_at,entity_title,entity_kind}]}，只有 limit 与 q，没有 total/offset
+//     author_name,body,created_at,entity_title,entity_kind}]}，使用 page/page_size 与 q，没有 total
 //   internal/handler/forum.go:724-755    —— 主题详情的 posts 是 [{id,topic_id,user_id,author_name,
 //     content,post_number,reply_to_post_number,created_at}]
 export interface CommentRow {

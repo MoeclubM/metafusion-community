@@ -249,4 +249,9 @@
   "admin.err.contentStillPresent": "内容还在：请先用既有删除入口把它下线，再记录“内容已下线”。",
   "admin.err.enforcementNotSupported": "该处置结论不适用于这个对象（实体 / 资源 / 用户的动作归各自的服务）。",
   "admin.err.noteRequired": "这个动作必须填写说明。",
-  "admin.err.notRemovable": "该对象不在互动服务里，不能从这里下线。" }
+  "admin.err.notRemovable": "该对象不在互动服务里，不能从这里下线。",
+  "admin.theme.modeLabel": "外观",
+  "admin.theme.dark": "深色",
+  "admin.theme.light": "浅色",
+  "admin.theme.system": "跟随系统"
+}

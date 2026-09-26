@@ -69,6 +69,7 @@ func signTokenWith(t *testing.T, key *rsa.PrivateKey, kid, sub, role string, gro
 	claims := jwt.MapClaims{
 		"sub":                sub,
 		"preferred_username": "kana",
+		"token_use":          "session",
 		"role":               role,
 		"iss":                testIssuer,
 		"aud":                testAudience,
@@ -121,7 +122,7 @@ func TestMiddlewareResolvesPrincipalFromJWKS(t *testing.T) {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{
-			"id": p.ID, "role": p.Role, "username": p.Username,
+			"id": p.ID, "username": p.Username,
 			"groups": strings.Join(p.Groups, ","), "permissions": strings.Join(p.Permissions, ","),
 		})
 	})
@@ -143,7 +144,7 @@ func TestMiddlewareResolvesPrincipalFromJWKS(t *testing.T) {
 	}
 	var got map[string]string
 	_ = json.Unmarshal(w.Body.Bytes(), &got)
-	if got["role"] != "editor" || got["username"] != "kana" {
+	if got["id"] != testSubject || got["username"] != "kana" {
 		t.Fatalf("身份还原不符: %v", got)
 	}
 
@@ -280,7 +281,7 @@ func TestTopicCreateRejectsOversizedBody(t *testing.T) {
 	// 而不是被标题/正文长度校验顺带拦下。
 	big := `{"board_code":"casual","title":"x","content":"ok","padding":"` + strings.Repeat("a", 3<<20) + `"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/community/topics", strings.NewReader(big))
-	req.Header.Set("Authorization", "Bearer "+signToken(t, key, kid, "user"))
+	req.Header.Set("Authorization", "Bearer "+signTokenWith(t, key, kid, testSubject, "user", nil, []string{auth.PermissionPostCreate}))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)

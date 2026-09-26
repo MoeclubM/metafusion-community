@@ -88,6 +88,7 @@ func reverseStub() *httptest.Server {
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not_found"}`))
 	}))
 }
 
@@ -132,6 +133,7 @@ func forwardOnlyStub() *httptest.Server {
 			_, _ = w.Write([]byte(identityPayload(txAliasD)))
 		default:
 			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not_found"}`))
 		}
 	}))
 }
@@ -155,8 +157,7 @@ func TestResolveAliasSetForwardOnlyCompat(t *testing.T) {
 	}
 }
 
-// legacyStub 模拟还没有 /identity 路由的旧目录：只有实体与 /resolve。
-// X01-compat：回退到 Lookup 拼 {canonical + 请求 ID}，调用方不动。
+// legacyStub 模拟缺少身份契约的目录实例。
 func legacyStub() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -172,36 +173,24 @@ func legacyStub() *httptest.Server {
 	}))
 }
 
-func TestIdentityFallbackWithoutContract(t *testing.T) {
+func TestIdentityDoesNotFallbackWithoutContract(t *testing.T) {
 	srv := legacyStub()
 	defer srv.Close()
 	c := New(srv.URL, 2*time.Second)
 	ctx := context.Background()
 
-	v, err := c.Identity(ctx, txAliasA)
-	if err != nil || v.CanonicalID != txAliasD {
-		t.Fatalf("旧目录应回退到 Lookup 归一：%+v err=%v", v, err)
+	if v, err := c.Identity(ctx, txAliasA); err == nil || v.CanonicalID != "" {
+		t.Fatalf("缺少身份契约应返回上游错误：%+v err=%v", v, err)
 	}
-	sameSet(t, append(append([]string{}, v.Aliases...), v.CanonicalID), txAliasA, txAliasD)
-
-	if canonical, set, err := c.ResolveAliasSet(ctx, txAliasA); err != nil || canonical != txAliasD {
-		t.Fatalf("旧目录展开应含双 ID：canonical=%q err=%v", canonical, err)
-	} else {
-		sameSet(t, set, txAliasA, txAliasD)
+	if canonical, set, err := c.ResolveAliasSet(ctx, txAliasA); err == nil || canonical != "" || len(set) != 0 {
+		t.Fatalf("缺少身份契约不得拼别名：canonical=%q set=%v err=%v", canonical, set, err)
 	}
-	if v, err := c.Identity(ctx, txMissing); err != nil || v.CanonicalID != "" {
-		t.Fatalf("旧目录不可见应回零值无错误：%+v err=%v", v, err)
+	if v, err := c.Identity(ctx, txMissing); err == nil || v.CanonicalID != "" {
+		t.Fatalf("旧目录缺失接口应返回上游错误：%+v err=%v", v, err)
 	}
 
-	m, err := c.IdentityMany(ctx, []string{txAliasA, txAliasD, txMissing})
-	if err != nil {
-		t.Fatalf("旧目录批量应回退不断言：%v", err)
-	}
-	if m[txAliasA].CanonicalID != txAliasD || m[txAliasD].CanonicalID != txAliasD {
-		t.Fatalf("旧目录批量映射不符：%v", m)
-	}
-	if _, ok := m[txMissing]; ok {
-		t.Fatalf("不可见不应进批量结果：%v", m)
+	if _, err := c.IdentityMany(ctx, []string{txAliasA, txAliasD, txMissing}); err == nil {
+		t.Fatal("批量身份接口缺失应返回契约错误")
 	}
 }
 

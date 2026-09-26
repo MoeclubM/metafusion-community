@@ -216,9 +216,7 @@ type IdentityResolution struct {
 
 // Identity 取单个身份解析。零值 + nil = 目录明确回答不可见/不存在；err != nil = 取不到。
 //
-// X01-compat（目录无反向契约时的回退）：/identity 不存在（旧目录回 404）且 Lookup 能
-// 见到实体时，按 Lookup 结果拼 {canonical + 请求 ID}；Lookup 同样不可见则按不可见回。
-// 非 404 的失败一律按上游不可用上报，不回退——把故障当兼容会丢监控信号。
+// 404 表示目录明确回答不可见/不存在；接口不存在属于部署契约错误。
 func (c *Client) Identity(ctx context.Context, entityID string) (IdentityResolution, error) {
 	if c.base == "" || entityID == "" {
 		if entityID == "" {
@@ -246,19 +244,13 @@ func (c *Client) Identity(ctx context.Context, entityID string) (IdentityResolut
 		}
 		return v, nil
 	case http.StatusNotFound:
-		// 新目录 = 实体不可见/不存在；旧目录 = 根本没有这条路由。Lookup 再问一次区分。
-		e, lerr := c.Lookup(ctx, entityID)
-		if lerr != nil {
-			return IdentityResolution{}, lerr
+		var payload struct {
+			Error string `json:"error"`
 		}
-		if e.ID == "" {
-			return IdentityResolution{}, nil
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil || payload.Error != "not_found" {
+			return IdentityResolution{}, upstreamError(c.name(), upstream.ReasonBadResponse, resp.StatusCode, errors.New("identity endpoint missing or unexpected 404 response"))
 		}
-		aliases := []string{}
-		if entityID != e.ID {
-			aliases = []string{entityID}
-		}
-		return IdentityResolution{CanonicalID: e.ID, Aliases: aliases, Entity: e}, nil
+		return IdentityResolution{}, nil
 	default:
 		return IdentityResolution{}, upstreamError(c.name(), statusReason(resp.StatusCode), resp.StatusCode, nil)
 	}
@@ -266,8 +258,6 @@ func (c *Client) Identity(ctx context.Context, entityID string) (IdentityResolut
 
 // IdentityMany 批量取身份解析（目录 POST /api/catalog/entities/identity，上限 500）。
 // 返回 requested→解析（不可见的不在结果里，调用方按 404/跳过）；err != nil = 上游不可用。
-//
-// X01-compat：旧目录无批量路由（404）时按 LookupMany 逐条拼兼容解析，调用方不动。
 func (c *Client) IdentityMany(ctx context.Context, ids []string) (map[string]IdentityResolution, error) {
 	out := map[string]IdentityResolution{}
 	if c.base == "" || len(ids) == 0 {
@@ -308,22 +298,6 @@ func (c *Client) IdentityMany(ctx context.Context, ids []string) (map[string]Ide
 		for id, v := range payload.Items {
 			if v.CanonicalID != "" {
 				out[id] = v
-			}
-		}
-		return out, nil
-	case http.StatusNotFound:
-		// 旧目录无批量路由：按 LookupMany 拼兼容解析（不可见的记缺席）。
-		meta, lerr := c.LookupMany(ctx, ids)
-		if lerr != nil {
-			return nil, lerr
-		}
-		for _, id := range ids {
-			if e, ok := meta[id]; ok && e.ID != "" {
-				aliases := []string{}
-				if id != e.ID {
-					aliases = []string{id}
-				}
-				out[id] = IdentityResolution{CanonicalID: e.ID, Aliases: aliases, Entity: e}
 			}
 		}
 		return out, nil

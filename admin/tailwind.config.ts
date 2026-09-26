@@ -6,12 +6,12 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        surface: "#0b1020",
-        panel: "#131a2c",
-        line: "#26304a",
-        ink: "#e6ebf5",
-        muted: "#93a0bd",
-        accent: "#5b8def",
+        surface: "var(--admin-surface)",
+        panel: "var(--admin-panel)",
+        line: "var(--admin-line)",
+        ink: "var(--admin-ink)",
+        muted: "var(--admin-muted)",
+        accent: "var(--admin-accent)",
         danger: "#ef5350",
       },
     },

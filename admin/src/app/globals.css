@@ -4,6 +4,22 @@
 
 :root {
   color-scheme: dark;
+  --admin-surface: #0b1020;
+  --admin-panel: #131a2c;
+  --admin-line: #26304a;
+  --admin-ink: #e6ebf5;
+  --admin-muted: #93a0bd;
+  --admin-accent: #5b8def;
+}
+
+[data-theme-mode="light"] {
+  color-scheme: light;
+  --admin-surface: #f8fafc;
+  --admin-panel: #ffffff;
+  --admin-line: #dce3ed;
+  --admin-ink: #0f172a;
+  --admin-muted: #64748b;
+  --admin-accent: #2563eb;
 }
 
 body {
@@ -11,12 +27,12 @@ body {
 }
 
 a {
-  @apply text-sky-300 underline-offset-2 hover:underline;
+  @apply text-accent underline-offset-2 hover:underline;
 }
 
 /* 原生下拉框与其它 MetaFusion 前端保持暗色配色和箭头一致。 */
 select {
-  color-scheme: dark;
+  color-scheme: inherit;
   appearance: none;
   -webkit-appearance: none;
   -moz-appearance: none;
@@ -37,9 +53,9 @@ select:focus-visible {
 }
 select:disabled { opacity: 0.5; cursor: not-allowed; }
 select option {
-  color: #e6ebf5;
-  background-color: #0b1020;
+  color: var(--admin-ink);
+  background-color: var(--admin-panel);
   padding: 6px 12px;
 }
 select option:checked,
-select option:hover { color: #e6ebf5; background-color: #131a2c; }
+select option:hover { color: var(--admin-ink); background-color: var(--admin-surface); }

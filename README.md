@@ -174,9 +174,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 拿它当检索入口等于每次排查都在篡改统计。因此本端点只读，并一次带上治理所需上下文。
 
 - **闸门**：`community.post.moderate`（与处置内容的其它入口同一码），匿名 401 `authentication_required`、缺码 403 `forbidden`。
-- **分页**：`page`/`page_size` 写法（缺省 20、上限 100，越界静默收敛），与 `/api/messages/*`、`/api/favorites/*` 同口径；
-  响应形状同样是 `{"items":[…],"total":N}`。`/api/community/topics` 的 `limit`/`offset` 属兼容期内的另一套口径
-  （见 `internal/handler/paging.go` 的说明），本次不动它，也没有在本端点上另开口子。
+- **分页**：`page`/`page_size`（缺省 20、上限 100，越界静默收敛），与 `/api/community/topics`、`/api/messages/*`、`/api/favorites/*` 同口径；响应形状是 `{"items":[…],"total":N}`。
 - **关键词**：`q` 走 `ILIKE` 子串匹配主题标题或回复正文，与主题列表的搜索同口径。
   **不引入 `to_tsvector`**：默认分词配置对中文按词切分的假设不成立（中文没有空格边界），
   全文索引只会把"搜不到"变成"看起来支持却搜不到"。与 topics 列表一样，`q` 里的 `%`/`_` 会被当通配符。
@@ -323,32 +321,20 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 下面的一次性工具只搬数据、不管结构。已应用的迁移文件按 checksum 校验，**不能改**：
 结构要变就新增版本，改了已应用的文件会让服务拒绝启动。
 
-### 语言字段的现状与取舍
+### 多语言板块字段
 
 版本序列：`000001` 基线（多语言 JSONB + `topics.language`）→ `000002` 板块名收敛为单值列 →
-`000003` 主题 language 列退役 → `000004` **前向恢复**多语言列（接口层不引入语言维度）。
+`000003` 主题 language 列退役 → `000004` 前向恢复多语言列 → `000014` 删除板块单值列和主题 language 列。
 
 | 列 | 状态 | 谁在用 |
 | --- | --- | --- |
 | `community.boards.names` / `descriptions`（jsonb） | 保留，**权威** | 板块列表与管理接口只收发它 |
-| `community.boards.name` / `description`（text） | 保留，**兼容/回退** | 由 `names`/`descriptions` 的 zh-CN 派生；不再接受写入 |
-| `community.topics.language`（text） | 保留，恒为空串 | 无：接口不 SELECT、不接受、不返回 |
+| `community.boards.name` / `description`（text） | 已删除 | 用多语言字段读取 |
+| `community.topics.language`（text） | 已删除 | 主题无语言维度 |
 
-两处取舍与理由：
+板块管理接口只接收四语 `names` / `descriptions` map。读方按语言从 map 取值。
 
-- **单值列不 DROP**。000002 已经把它做成了权威字段，000004 之后管理接口改为只写多语言 map，
-  单值列退化为"容量层的兼容/回退列"——派生值口径固定（zh-CN 优先），读方（老前端、排查用的 SQL）
-  仍能从一个平列取到板块名。DROP 掉反而要让所有只认单值的读方改用 `names ->> 'zh-CN'`，
-  收益只是少一列，不划算；`000004` 的回填方向也刻意定成"单值 → 多语言"，让这两列互为一致性校验。
-- **`topics.language` 的历史值不恢复**：000003 已经把列连同数据一起 DROP，旧单体的
-  `modules.forum_topics.language` 也不保证与切流后的写入同步。000004 只把列加回来并保持空串，
-  它不参与任何读取——加回来是为了满足"列必须保留"的库结构口径，不是要让语言维度回到接口里。
-- **板块管理接口的四语校验只认 map**：载荷里带单值 `name` 会被当作空载荷拒绝（gin 忽略未声明字段）。
-  给单值开一条写入口等于在接口层把语言维度装回来，还会让"这次到底改了哪个语种"说不清；
-  前端本来就按 `DynamicNamesEditor` 那类四语编辑器提交 map。
-
-本服务拥有 `community` schema，表结构与主仓库 `modules` 包中的 `forum_*` **逐列一致**，
-因此切流前可用附带的一次性导入工具搬运数据，不需要字段映射：
+本服务拥有 `community` schema；存量数据迁移使用附带的一次性导入工具，结构差异由迁移版本处理：
 
 ```bash
 # 切换前：先看规模（不写入），再搬运
@@ -380,7 +366,7 @@ go run cmd/migrate -direction back
 | `PORT` | `8083` | 监听端口 |
 | `DATABASE_URL` | 由 `DB_*` 拼装 | PostgreSQL 连接串（业务表在 `community` schema；审计表在跨服务共用的 `audit`，见「审计留痕」） |
 | `COMMUNITY_JWKS_URL` | `http://auth:8081/api/oidc/jwks` | 验签公钥来源：账号服务是唯一签发方 |
-| `AUTH_URL` | 空 | 账号服务地址：存量不透明会话令牌的兜底解析（`GET /api/auth/me`）与 PAT 内省（`POST /api/auth/tokens/introspect`）；留空即"只接受 JWT"且 PAT 一律 `503 auth_unavailable` |
+| `AUTH_URL` | 空 | 账号服务地址：PAT 内省（`POST /api/auth/tokens/introspect`）及健康探针；留空时 PAT 一律 `503 auth_unavailable` |
 | `AUTH_JWT_PUBLIC_KEY` | 空 | 静态公钥（PEM 或 base64 PEM）；设置后不再请求 JWKS |
 | `AUTH_JWT_ISSUER` / `AUTH_JWT_AUDIENCE` | `https://findverse.cc/api` / `metafusion` | 与主仓库一致，避免存量令牌失效 |
 | `CATALOG_URL` | `http://backend:8080` | 目录服务地址（可见性、标题、关系邻居） |

@@ -1,5 +1,5 @@
 // 主题与回复的纯逻辑：列表响应解析、翻页换算、摘要。
-// 契约来源：internal/handler/forum.go:280-356（{items,total}、q/board_code/limit/offset、置顶优先）。
+// 契约来源：internal/handler/forum.go（{items,total}、q/board_code/page/page_size、置顶优先）。
 export interface ForumTag {
   id: number;
   name: string;

@@ -7,7 +7,6 @@ export interface SessionUser {
   id: string;
   username: string;
   display_name?: string | null;
-  role?: string | null;
   groups?: string[] | null;
   permissions?: string[] | null;
 }

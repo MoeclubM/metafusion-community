@@ -10,13 +10,12 @@ import (
 
 // S01 矩阵 L3：token_use 区分会话与第三方（与签发侧 7e5bd35 对齐）。
 // 会话 JWT 恒带 token_use=session，必须按第一方放行；只有 oauth/id_token 是第三方；
-// 未知取值 fail closed；缺键是历史令牌，按会话语义兼容。
+// 未知取值与缺键都拒收。
 func signTokenUse(t *testing.T, key *rsa.PrivateKey, kid string, extra map[string]any) string {
 	t.Helper()
 	claims := jwt.MapClaims{
 		"sub":                "aaaaaaaa-0000-0000-0000-000000000001",
 		"preferred_username": "kana",
-		"role":               "user",
 		"iss":                jwksTestIssuer,
 		"aud":                jwksTestAudience,
 		"exp":                time.Now().Add(10 * time.Minute).Unix(),
@@ -57,9 +56,6 @@ func TestVerifySessionTokenUseIsFirstParty(t *testing.T) {
 	}
 	if p.IsThirdParty {
 		t.Fatal("token_use=session 不得判为第三方")
-	}
-	if !p.PermissionsSet {
-		t.Fatal("显式 permissions 必须记为已声明")
 	}
 	if !p.Can(PermissionPostModerate) {
 		t.Fatal("会话持治理码应放行")
@@ -127,40 +123,25 @@ func TestVerifyUnknownTokenUseRejected(t *testing.T) {
 	}
 }
 
-// 历史令牌（无 token_use、无 scope）：按会话语义兼容——发帖走老边界，
-// 治理码不再回落 admin（S01），第三方标记为假。
-func TestVerifyLegacyWithoutTokenUse(t *testing.T) {
+// 缺少 token_use 的 JWT 必须拒收。
+func TestVerifyRejectsMissingTokenUse(t *testing.T) {
 	key := jwksTestKey(t)
 	v, kid := tokenUseVerifier(t, key)
-	token := signTokenUse(t, key, kid, map[string]any{"role": "admin"})
-	p, err := v.Verify(token)
-	if err != nil {
-		t.Fatalf("历史令牌验签失败: %v", err)
-	}
-	if p.IsThirdParty {
-		t.Fatal("无用途标记不得判为第三方")
-	}
-	if !p.Can(PermissionPostCreate) {
-		t.Fatal("老令牌仍可发帖")
-	}
-	if p.Can(PermissionPostModerate) {
-		t.Fatal("老令牌的 admin 不得凭角色放行治理码")
+	token := signTokenUse(t, key, kid, map[string]any{})
+	if _, err := v.Verify(token); err == nil {
+		t.Fatal("缺少 token_use 必须拒收")
 	}
 }
 
-// 缺省用途下仍带 scope/client_id（签发侧过渡态）：视为第三方——会话签发恒清零这两项。
-func TestVerifyEmptyUseWithScopeIsThirdParty(t *testing.T) {
+// scope/client_id 不能替代必需的 token_use。
+func TestVerifyRejectsMissingUseWithScope(t *testing.T) {
 	key := jwksTestKey(t)
 	v, kid := tokenUseVerifier(t, key)
 	token := signTokenUse(t, key, kid, map[string]any{
 		"scope":     "profile",
 		"client_id": "transitional-app",
 	})
-	p, err := v.Verify(token)
-	if err != nil {
-		t.Fatalf("验签失败: %v", err)
-	}
-	if !p.IsThirdParty {
-		t.Fatal("缺省用途下带 scope/client_id 必须判为第三方")
+	if _, err := v.Verify(token); err == nil {
+		t.Fatal("缺少 token_use 必须拒收")
 	}
 }

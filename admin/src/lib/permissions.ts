@@ -7,7 +7,7 @@ export const COMMUNITY_TOPIC_PIN = "community.topic.pin";
 export const COMMUNITY_BOARD_MANAGE = "community.board.manage";
 export const COMMUNITY_REPORT_REVIEW = "community.report.review";
 
-/** 治理类码（缺权限声明时只认 role=admin），与服务的 communityPermissionCodes 同集合。 */
+/** 治理类码，与服务的 communityPermissionCodes 同集合。 */
 export const COMMUNITY_GOVERNANCE_CODES = [
   COMMUNITY_POST_MODERATE,
   COMMUNITY_TOPIC_PIN,
@@ -15,26 +15,19 @@ export const COMMUNITY_GOVERNANCE_CODES = [
   COMMUNITY_REPORT_REVIEW,
 ] as const;
 
-/** 老令牌（无 permissions）下仍然按"登录即可"放行的码，与服务 legacyOpenCodes 一致。 */
-export const LEGACY_OPEN_CODES = [COMMUNITY_POST_CREATE] as const;
-
 export type PermissionSubject = {
-  role?: string | null;
   permissions?: string[] | null;
 } | null | undefined;
 
 /**
  * can 判定身份是否持有权限码：
- *   - 令牌带 permissions（非空）→ 只认码，含 * 通配，角色不再额外放行；
- *   - 令牌没有 permissions → 发帖类码放行（历史边界），治理类码只认 role=admin。
+ *   - 只认 permissions，含 * 通配。
  * 与服务 internal/auth/permission.go 的 Can 一一对应。
  */
 export function can(subject: PermissionSubject, code: string): boolean {
   if (!subject) return false;
   const perms = subject.permissions ?? [];
-  if (perms.length > 0) return perms.includes("*") || perms.includes(code);
-  if ((LEGACY_OPEN_CODES as readonly string[]).includes(code)) return true;
-  return subject.role === "admin" && (COMMUNITY_GOVERNANCE_CODES as readonly string[]).includes(code);
+  return perms.includes("*") || perms.includes(code);
 }
 
 /** 任一码持有即可（用于"页签是否出现"这种多码入口）。 */

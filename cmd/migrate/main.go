@@ -44,27 +44,14 @@ const setTagsSeq = `SELECT setval(pg_get_serial_sequence('%s.tags','id'), GREATE
 // forwardSteps：主仓库 → 互动服务。目标表名不变，只有 schema 变化；
 // 唯一跨 schema 的源是收藏（主仓库把它放在 catalog schema 里）。
 var forwardSteps = []step{
-	// 目标侧（community.boards）000004 之后是多语言列（权威）+ 单值列（派生回退）并存，老表是 jsonb 四语 map：
-	// 这里按与迁移同一优先级取一个值（zh-CN → en-US → zh-TW → ja-JP → 任一值 → code）写单值列，
-	// 同时把**同一份值**写进多语言列的 zh-CN 键——只填单值列会让新库的板块列表（读多语言列）拿到空名。
-	// 多语言列里其它语种的值不搬：切流前它们本就在单值化时丢过一次，这里不假装复原。
-	{name: "boards", table: "forum_boards", sql: `INSERT INTO community.boards(code,names,descriptions,name,description,color,icon,sort_order,is_enabled,show_in_feed)
+	// 老表原本存多语言 JSONB，迁移时保留全部已有语种。
+	{name: "boards", table: "forum_boards", sql: `INSERT INTO community.boards(code,names,descriptions,color,icon,sort_order,is_enabled,show_in_feed)
 		SELECT code,
-			jsonb_build_object('zh-CN', fallback_name),
-			jsonb_build_object('zh-CN', fallback_description),
-			fallback_name, fallback_description,
+			names, descriptions,
 			color,icon,sort_order,is_enabled,show_in_feed
-		FROM (
-			SELECT code,color,icon,sort_order,is_enabled,show_in_feed,
-				COALESCE(NULLIF(btrim(names->>'zh-CN'),''), NULLIF(btrim(names->>'en-US'),''), NULLIF(btrim(names->>'zh-TW'),''), NULLIF(btrim(names->>'ja-JP'),''),
-					(SELECT NULLIF(btrim(v),'') FROM jsonb_each_text(names) ORDER BY key LIMIT 1), code) AS fallback_name,
-				COALESCE(NULLIF(btrim(descriptions->>'zh-CN'),''), NULLIF(btrim(descriptions->>'en-US'),''), NULLIF(btrim(descriptions->>'zh-TW'),''), NULLIF(btrim(descriptions->>'ja-JP'),''),
-					(SELECT NULLIF(btrim(v),'') FROM jsonb_each_text(descriptions) ORDER BY key LIMIT 1), '') AS fallback_description
-			FROM modules.forum_boards
-		) src
+		FROM modules.forum_boards
 		ON CONFLICT (code) DO NOTHING`},
-	// 目标侧（community.topics）的 language 列由 000004 保留但恒为空串：老表有值也刻意不带过去
-	//（论坛只去掉语言维度、不去字段，但历史语言值在 000003 已经丢过一次，这里不假装复原）。
+	// 主题不迁移无用途的语言维度。
 	{name: "topics", table: "forum_topics", sql: `INSERT INTO community.topics(id,board_code,author_id,author_name,title,body,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at)
 		SELECT id,board_code,author_id,author_name,title,body,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at FROM modules.forum_topics
 		ON CONFLICT (id) DO NOTHING`},
@@ -88,17 +75,14 @@ var forwardSteps = []step{
 
 // backSteps：互动服务 → 主仓库（回滚用）。顺序与外键一致，源表都在 community schema。
 var backSteps = []step{
-	// 反向搬运回老表（老表口径是四语 map，回滚只要求字段能装下）：000004 之后源表多语言列是权威，
-	// 优先搬整份 map；只有 map 里没有 zh-CN 时才退回落差单值列（老表读方按 zh-CN 取键）。
+	// 反向搬运回老表时保留完整多语言 map。
 	{name: "boards", schema: "community", sql: `INSERT INTO modules.forum_boards(code,names,descriptions,color,icon,sort_order,is_enabled,show_in_feed)
-		SELECT code,
-			CASE WHEN NULLIF(btrim(names->>'zh-CN'),'') IS NULL THEN jsonb_build_object('zh-CN', name) ELSE names END,
-			CASE WHEN NULLIF(btrim(descriptions->>'zh-CN'),'') IS NULL THEN jsonb_build_object('zh-CN', description) ELSE descriptions END,
+		SELECT code,names,descriptions,
 			color,icon,sort_order,is_enabled,show_in_feed FROM community.boards
 		ON CONFLICT (code) DO NOTHING`},
-	// 反向搬运要写回老表：老表仍带 language（四语时代结构），源表的 language 列恒为空串，照搬即可。
+	// 老表仍带 language；回写时提供空值，不从新表读取该列。
 	{name: "topics", schema: "community", sql: `INSERT INTO modules.forum_topics(id,board_code,author_id,author_name,title,body,language,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at)
-		SELECT id,board_code,author_id,author_name,title,body,language,entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at FROM community.topics
+		SELECT id,board_code,author_id,author_name,title,body,'',entity_id,is_pinned,is_locked,view_count,reply_count,created_at,updated_at,last_activity_at FROM community.topics
 		ON CONFLICT (id) DO NOTHING`},
 	{name: "posts", schema: "community", sql: `INSERT INTO modules.forum_posts(id,topic_id,author_id,author_name,body,post_number,reply_to_post_number,created_at,updated_at)
 		SELECT id,topic_id,author_id,author_name,body,post_number,reply_to_post_number,created_at,updated_at FROM community.posts

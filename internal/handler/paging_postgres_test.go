@@ -141,12 +141,11 @@ func TestPaginationWindowsAgainstPostgres(t *testing.T) {
 		}
 	}
 
-	// 写法一：limit/offset（/api/community/topics），缺省页宽 30、上限 100。
-	fullTopics := idsOf(items("/api/community/topics?board_code="+probeBoard+"&limit=100&offset=0", ""), "id")
-	windowTopics := idsOf(items("/api/community/topics?board_code="+probeBoard+"&limit=2&offset=2", ""), "id")
-	assertWindow("limit/offset（主题列表）", fullTopics, windowTopics)
+	fullTopics := idsOf(items("/api/community/topics?board_code="+probeBoard+"&page=1&page_size=100", ""), "id")
+	windowTopics := idsOf(items("/api/community/topics?board_code="+probeBoard+"&page=2&page_size=2", ""), "id")
+	assertWindow("page/page_size（主题列表）", fullTopics, windowTopics)
 
-	// 写法二：page/page_size（/api/favorites/mine），缺省页宽 20。
+	// 收藏列表同样使用 page/page_size，缺省页宽 20。
 	fullFavs := idsOf(items("/api/favorites/mine?page=1&page_size=100", token), "target_id")
 	windowFavs := idsOf(items("/api/favorites/mine?page=2&page_size=2", token), "target_id")
 	assertWindow("page/page_size（我的收藏）", fullFavs, windowFavs)

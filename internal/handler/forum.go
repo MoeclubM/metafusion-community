@@ -80,8 +80,7 @@ func decodeLocales(raw string) (map[string]string, error) {
 	return out, nil
 }
 
-// seedForum 写多语言列，并按同一套派生规则（zh-CN 优先）同步单值回退列——播种也是写入路径，
-// 不能让种子板块的单值列永远空着（那会让"单值列是派生回退值"这条不变量出现例外）。
+// seedForum 写入板块的多语言名称和描述。
 func seedForum(ctx context.Context, db *sql.DB) error {
 	for _, b := range defaultBoards {
 		names, err := encodeLocales(b.Names)
@@ -93,9 +92,9 @@ func seedForum(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 		if _, err = db.ExecContext(ctx, `
-			INSERT INTO community.boards(code,names,descriptions,name,description,color,icon,sort_order,is_enabled,show_in_feed)
-			VALUES($1,$2::jsonb,$3::jsonb,$4,$5,$6,$7,$8,true,$9) ON CONFLICT (code) DO NOTHING`,
-			b.Code, names, descriptions, aggregateLocale(b.Names), aggregateLocale(b.Descriptions),
+			INSERT INTO community.boards(code,names,descriptions,color,icon,sort_order,is_enabled,show_in_feed)
+			VALUES($1,$2::jsonb,$3::jsonb,$4,$5,$6,true,$7) ON CONFLICT (code) DO NOTHING`,
+			b.Code, names, descriptions,
 			b.Color, b.Icon, b.Order, b.InFeed); err != nil {
 			return err
 		}
@@ -112,15 +111,11 @@ const commentBoard = "comment"
 // 窗口在 Go 侧过滤，避免无上限地把整表读进内存。
 const feedScanCap = 500
 
-// forumBoard 是板块的对外形状。names/descriptions 是四语 map，服务端不做单语解析；
-// name/description 是**兼容/回退单值列**（容量层保留，值由多语言 map 的 zh-CN 派生），
-// 老前端只认单值时仍然有值可显示，但写入只认 names/descriptions。
+// forumBoard 是板块的对外形状。names/descriptions 是四语 map，服务端不做单语解析。
 type forumBoard struct {
 	Code         string            `json:"code"`
 	Names        map[string]string `json:"names"`
 	Descriptions map[string]string `json:"descriptions"`
-	Name         string            `json:"name"`
-	Description  string            `json:"description"`
 	Color        string            `json:"color"`
 	Icon         string            `json:"icon"`
 	SortOrder    int               `json:"sort_order"`
@@ -130,7 +125,7 @@ type forumBoard struct {
 
 // boardCols 是板块的 SELECT / RETURNING 列清单，列表接口与管理接口共用同一份顺序，
 // 避免两处列不同步导致 scanBoardRow 静默串列。
-const boardCols = "code,names,descriptions,name,description,color,icon,sort_order,is_enabled,show_in_feed"
+const boardCols = "code,names,descriptions,color,icon,sort_order,is_enabled,show_in_feed"
 
 // 板块的两个开关分工不同（语义定稿，README「板块」一节同步一份）：
 //   - is_enabled=false 是"整个板块停用"：公开读路径（板块列表、按板块的主题列表、主题详情，
@@ -317,7 +312,12 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 	})
 
 	api.GET("/community/topics", h.guard(false), func(c *gin.Context) {
-		limit, offset := pagingLimitOffset(c, 30)
+		_, hasLanguage := c.GetQuery("language")
+		if legacyPaging(c) || hasLanguage {
+			fail(c, 400, "invalid_query_param")
+			return
+		}
+		limit, offset := pagingPageSize(c, 30)
 		args := []any{}
 		where := []string{"1=1"}
 		// 评论与主题共用存储但语义不同：默认只列"主题"（排除评论板块），
@@ -500,7 +500,6 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			BoardCode string   `json:"board_code"`
 			Title     string   `json:"title"`
 			Content   string   `json:"content"`
-			WorkID    string   `json:"work_id"`
 			EntityID  string   `json:"entity_id"`
 			TagIDs    []int64  `json:"tag_ids"`
 			TagNames  []string `json:"tag_names"`
@@ -522,9 +521,6 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 		}
 		// 关联实体必须可见，否则视为非法引用。
 		entityID := strings.TrimSpace(in.EntityID)
-		if entityID == "" {
-			entityID = strings.TrimSpace(in.WorkID)
-		}
 		if entityID != "" {
 			if _, err := uuid.Parse(entityID); err != nil {
 				fail(c, 400, "invalid_reference")
@@ -597,9 +593,7 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 		}
 		var in struct {
 			Content           string `json:"content"`
-			Body              string `json:"body"`
 			ReplyToPostNumber *int   `json:"reply_to_post_number"`
-			ReplyToPostID     string `json:"reply_to_post_id"`
 		}
 		// 与其余写接口同一份解析助手：少了它这条路由会绕过本服务的 2MB 上限，
 		// 而网关的 client_max_body_size 是 1G，超大载荷会被整份读进内存。
@@ -607,9 +601,6 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			return
 		}
 		content := strings.TrimSpace(in.Content)
-		if content == "" {
-			content = strings.TrimSpace(in.Body)
-		}
 		if content == "" || len(content) > 50000 {
 			fail(c, 400, "invalid_payload")
 			return
@@ -661,12 +652,6 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 			return
 		}
 		replyTo := in.ReplyToPostNumber
-		if replyTo == nil && in.ReplyToPostID != "" {
-			var n int
-			if err = tx.QueryRowContext(c.Request.Context(), "SELECT post_number FROM community.posts WHERE id=$1 AND topic_id=$2", in.ReplyToPostID, topicID).Scan(&n); err == nil {
-				replyTo = &n
-			}
-		}
 		if _, err = tx.ExecContext(c.Request.Context(), `
 			INSERT INTO community.posts(id,topic_id,author_id,author_name,body,post_number,reply_to_post_number)
 			VALUES($1,$2,$3,$4,$5,$6,$7)`, pid, topicID, p.ID, authorName(p), content, next, replyTo); err != nil {

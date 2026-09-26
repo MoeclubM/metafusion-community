@@ -6,21 +6,20 @@ import { fetchApi } from "./client";
 export interface TopicListParams {
   boardCode?: string;
   q?: string;
-  limit: number;
-  offset: number;
+  page: number;
+  pageSize: number;
 }
 
 /**
- * 主题列表：limit/offset 写法（本端点第 2 代兼容期内的口径，见服务端 paging.go；
- * 新端点用的是 page/page_size，两套在各自端点内保持单一来源）。
+ * 主题列表使用 page/page_size 分页。
  * board_code=all 与服务端"不带该参数"同义：都会排除评论板块。
  */
 export function fetchTopics(params: TopicListParams): Promise<TopicPage> {
   const query = new URLSearchParams();
   if (params.boardCode && params.boardCode !== "all") query.set("board_code", params.boardCode);
   if (params.q && params.q.trim() !== "") query.set("q", params.q.trim());
-  query.set("limit", String(params.limit));
-  query.set("offset", String(params.offset));
+  query.set("page", String(params.page));
+  query.set("page_size", String(params.pageSize));
   return fetchApi<unknown>("/api/community/topics?" + query.toString()).then((raw) => {
     const page = raw as { items?: unknown; total?: unknown };
     return {
