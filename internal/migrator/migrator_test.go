@@ -194,8 +194,6 @@ func TestRestoreMultilingualFieldsMigrationRestoresColumns(t *testing.T) {
 
 	// 1) 造 000001 的基线结构：多语言列（000002 删了）与 topics.language（000003 删了）都不在。
 	for _, stmt := range []string{
-		"ALTER TABLE community.boards ADD COLUMN IF NOT EXISTS name text",
-		"ALTER TABLE community.boards ADD COLUMN IF NOT EXISTS description text",
 		"ALTER TABLE community.boards DROP COLUMN IF EXISTS names",
 		"ALTER TABLE community.boards DROP COLUMN IF EXISTS descriptions",
 		"ALTER TABLE community.topics DROP COLUMN IF EXISTS language",
@@ -269,6 +267,8 @@ func TestRestoreMultilingualFieldsBackfillsFromSingleValues(t *testing.T) {
 
 	// 造 000002/000003 之后的结构：多语言列与 topics.language 都不在。
 	for _, stmt := range []string{
+		"ALTER TABLE community.boards ADD COLUMN IF NOT EXISTS name text",
+		"ALTER TABLE community.boards ADD COLUMN IF NOT EXISTS description text",
 		"ALTER TABLE community.boards DROP COLUMN IF EXISTS names",
 		"ALTER TABLE community.boards DROP COLUMN IF EXISTS descriptions",
 		"ALTER TABLE community.topics DROP COLUMN IF EXISTS language",
