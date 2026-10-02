@@ -347,11 +347,9 @@ go run cmd/migrate -direction back
 ```
 
 两个方向都存在，切流才是真的可回滚：**先搬数据再改网关**，否则回滚窗口内的新帖在单体侧会"消失"。
-完整步骤与逐步验证见主仓库 [docs/architecture/cutover-runbook.md](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/cutover-runbook.md)。
+现行升级与恢复见主仓库[部署与恢复手册](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/deployment-runbook.md)。旧单体搬运工具只用于仍保留源表的历史实例，不属于当前发布流程。
 
-工具只对**尚未 retire 的实例**有意义：开发实例已于 2026-09-14 执行
-`deploy/sql/retire-legacy-schemas.sql`（`modules` schema 与 `catalog.favorites` 已删除），
-在那台实例上两个方向都会因源表/目标表不存在而失败，回滚只剩"改网关上游 + 上一版镜像重建"。
+源表已退役的实例不能执行这两个方向，回退应使用已验证的发布组合或备份；实例退役状态须读数据库核实，不按文档中的历史日期推断。
 
 - 幂等：全部 `ON CONFLICT DO NOTHING`，失败重跑安全；
 - **只读旧表**：不删除、不修改 `modules.*`，因此切流前随时可以取消，回滚只需把网关指回单体；

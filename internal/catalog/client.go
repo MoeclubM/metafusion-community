@@ -205,9 +205,7 @@ func (c *Client) ResolveMany(ctx context.Context, ids []string) (map[string]stri
 
 // IdentityResolution 是目录身份契约的只读投影（主仓 lifecycle.go 的 IdentityResolution）：
 // canonical_id 为存活身份，aliases 为请求 ID 沿 merged 链走过的历史别名。
-// 注意它今天是前向的：查存活身份 D 拿不到曾合入的历史 A/B（目录侧只沿请求 ID 向前走），
-// 存活→历史的反向枚举待目录契约补齐；本服务把展开收敛在 ResolveAliasSet 一处，
-// 反向契约就绪后调用方不动（见 ResolveAliasSet 的 X01-compat 注释）。
+// aliases 同时包含正向合并链与存活身份的反向历史别名全集。
 type IdentityResolution struct {
 	CanonicalID string   `json:"canonical_id"`
 	Aliases     []string `json:"aliases"`
