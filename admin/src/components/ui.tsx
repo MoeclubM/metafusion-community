@@ -4,6 +4,7 @@
 // 错误文案在 lib/errors.ts）。所有文案都由调用方传入，不在组件里写死语言。
 
 import React from "react";
+import { useI18n } from "@/lib/i18n/provider";
 
 export const HEAD_CLASS = "px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-muted";
 export const CELL_CLASS = "px-3 py-2 text-xs align-top text-ink";
@@ -24,18 +25,19 @@ export function Card(props: { title: string; desc?: string; actions?: React.Reac
 }
 
 const NOTICE_TONE: Record<string, string> = {
-  ok: "border-emerald-500/40 bg-emerald-500/10 text-emerald-200",
-  err: "border-danger/40 bg-danger/10 text-red-200",
-  info: "border-accent/40 bg-accent/10 text-sky-200",
+  ok: "border-emerald-500/40 bg-emerald-500/10 text-ink",
+  err: "border-danger/40 bg-danger/10 text-ink",
+  info: "border-accent/40 bg-accent/10 text-ink",
 };
 
 export function Notice(props: { kind: "ok" | "err" | "info"; text: string; onClose?: () => void }) {
+  const { t } = useI18n();
   if (!props.text) return null;
   return (
-    <div className={"flex items-start justify-between gap-3 rounded-lg border px-3 py-2 text-xs " + NOTICE_TONE[props.kind]}>
-      <p className="leading-relaxed">{props.text}</p>
+    <div role={props.kind === "err" ? "alert" : "status"} className={"flex items-start justify-between gap-3 rounded-lg border px-3 py-2 text-xs " + NOTICE_TONE[props.kind]}>
+      <p className="min-w-0 break-words leading-relaxed">{props.text}</p>
       {props.onClose ? (
-        <button type="button" onClick={props.onClose} className="shrink-0 opacity-70 hover:opacity-100" aria-label="dismiss">
+        <button type="button" onClick={props.onClose} className="shrink-0 opacity-70 hover:opacity-100" aria-label={t("admin.close")}>
           ×
         </button>
       ) : null}
@@ -44,10 +46,10 @@ export function Notice(props: { kind: "ok" | "err" | "info"; text: string; onClo
 }
 
 const BADGE_TONE: Record<string, string> = {
-  ok: "bg-emerald-500/15 text-emerald-300",
+  ok: "bg-emerald-500/15 text-ink",
   off: "bg-white/5 text-muted",
-  info: "bg-accent/15 text-sky-300",
-  warn: "bg-amber-500/15 text-amber-200",
+  info: "bg-accent/15 text-ink",
+  warn: "bg-amber-500/15 text-ink",
 };
 
 export function Badge(props: { tone?: "ok" | "off" | "info" | "warn"; children: React.ReactNode }) {
@@ -61,7 +63,7 @@ export function Badge(props: { tone?: "ok" | "off" | "info" | "warn"; children: 
 const BUTTON_TONE: Record<string, string> = {
   primary: "bg-accent text-white hover:bg-accent/85 disabled:bg-accent/40",
   ghost: "border border-line text-ink hover:bg-white/5",
-  danger: "border border-danger/50 text-red-200 hover:bg-danger/15",
+  danger: "border border-danger/50 text-ink hover:bg-danger/15",
 };
 
 export function Button(
@@ -167,7 +169,7 @@ export function Pagination(props: {
   const atStart = props.page <= 1;
   const atEnd = props.page >= props.pages;
   return (
-    <div className="flex items-center justify-between gap-3 pt-3">
+    <div className="flex flex-wrap items-center justify-between gap-3 pt-3">
       <span className="text-[11px] text-muted">{props.labels.info}</span>
       <div className="flex items-center gap-2">
         <Button type="button" disabled={props.disabled || atStart} onClick={() => props.onChange(props.page - 1)}>
@@ -181,21 +183,57 @@ export function Pagination(props: {
   );
 }
 
-export function Modal(props: { title: string; onClose: () => void; children: React.ReactNode; footer?: React.ReactNode; wide?: boolean }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:p-8" role="dialog" aria-modal="true">
-      <div className={"w-full rounded-xl border border-line bg-panel shadow-xl " + (props.wide ? "max-w-3xl" : "max-w-xl")}>
-        <header className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
-          <h3 className="text-sm font-semibold text-ink">{props.title}</h3>
-          <button type="button" onClick={props.onClose} className="text-muted hover:text-ink" aria-label="close">
-            ×
-          </button>
-        </header>
-        <div className="space-y-4 px-4 py-4">{props.children}</div>
-        {props.footer ? <footer className="flex items-center justify-end gap-2 border-t border-line px-4 py-3">{props.footer}</footer> : null}
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+const dialogStack: HTMLElement[] = [];
+let originalOverflow = "";
+
+export function Modal(props: { title: string; onClose: () => void; children: React.ReactNode; footer?: React.ReactNode; wide?: boolean; busy?: boolean }) {
+  const {onClose, title, children, busy = false} = props;
+  const open = true;
+  const maxWidth = props.wide ? "max-w-3xl" : "max-w-xl";
+  const { t } = useI18n();
+  const titleId = React.useId();
+  const panel = React.useRef<HTMLDivElement>(null);
+  const latest = React.useRef({onClose, busy});
+  latest.current = {onClose, busy};
+  const close = () => { if (!latest.current.busy) latest.current.onClose(); };
+  React.useEffect(() => {
+    if (!open || !panel.current) return;
+    const element = panel.current;
+    const previous = document.activeElement as HTMLElement | null;
+    dialogStack.push(element);
+    if (dialogStack.length === 1) { originalOverflow = document.body.style.overflow; document.body.style.overflow = "hidden"; }
+    const items = () => Array.from(element.querySelectorAll<HTMLElement>(FOCUSABLE));
+    (items()[0] ?? element).focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (dialogStack.at(-1) !== element) return;
+      if (e.key === "Escape") { e.preventDefault(); close(); }
+      if (e.key !== "Tab") return;
+      const all = items(); const first = all[0]; const last = all.at(-1);
+      if (!first || !last) { e.preventDefault(); element.focus(); }
+      else if (e.shiftKey && (document.activeElement === first || document.activeElement === element || !element.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      const index = dialogStack.indexOf(element); if (index >= 0) dialogStack.splice(index, 1);
+      if (!dialogStack.length) document.body.style.overflow = originalOverflow;
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [open]);
+  if (!open) return null;
+  return <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}>
+    <div ref={panel} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
+      className={`w-full ${maxWidth} min-w-0 rounded-xl border border-line bg-panel p-5 sm:p-6 space-y-4 shadow-xl max-h-[90vh] overflow-y-auto outline-none`}>
+      <div className="flex items-center justify-between gap-3 border-b border-line/60 pb-3">
+        <h3 id={titleId} className="min-w-0 break-words text-sm font-semibold text-ink flex items-center gap-2">{title}</h3>
+        <button type="button" onClick={close} disabled={busy} aria-label={t("admin.close")} className="shrink-0 rounded-lg p-2 text-muted hover:bg-accent/10 disabled:opacity-50"><span aria-hidden="true">×</span></button>
       </div>
+      <div className="space-y-4">{children}</div>
+      {props.footer ? <footer className="flex flex-wrap justify-end gap-2 border-t border-line pt-3">{props.footer}</footer> : null}
     </div>
-  );
+  </div>;
 }
 
 export function ConfirmDialog(props: {
@@ -212,6 +250,7 @@ export function ConfirmDialog(props: {
     <Modal
       title={props.title}
       onClose={props.onClose}
+      busy={props.busy}
       footer={
         <>
           <Button type="button" onClick={props.onClose} disabled={props.busy}>

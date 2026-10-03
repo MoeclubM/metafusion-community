@@ -69,8 +69,8 @@ export function AppShell() {
   return (
     <div className="flex min-h-screen flex-col bg-surface text-ink">
       <header className="sticky top-0 z-30 border-b border-line bg-panel/95 backdrop-blur">
-        <div className="mx-auto flex h-14 w-full max-w-[80rem] items-center justify-between gap-3 px-4 sm:px-6">
-          <div className="flex min-w-0 items-center gap-3">
+        <div className="mx-auto flex min-h-14 flex-wrap py-2 w-full max-w-[80rem] items-center justify-between gap-3 px-4 sm:px-6">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
             <a href="/admin" className="inline-flex shrink-0 items-center gap-1 text-xs text-muted hover:text-ink"><span aria-hidden="true">←</span>{t("admin.backToHub")}</a>
             <span className="text-muted">/</span>
             <h1 className="min-w-0 truncate text-sm font-semibold text-ink">{t("admin.appTitle")}</h1>
@@ -103,7 +103,6 @@ export function AppShell() {
         ) : null}
 
         <main className="min-w-0 flex-1 space-y-4">
-          {status === "ready" ? <div className="flex justify-end"><Button type="button" onClick={refreshAll}>{t("admin.refresh")}</Button></div> : null}
           {status === "ready" && user ? (
             <details className="rounded-xl border border-line bg-surface px-4 py-3 text-xs">
               <summary className="cursor-pointer font-medium text-ink">
@@ -113,6 +112,7 @@ export function AppShell() {
                 <div><dt className="text-muted">{t("admin.session.labelGroups")}</dt><dd className="mt-1 text-ink">{(user.groups ?? []).join(", ") || t("admin.session.groupsNone")}</dd></div>
                 <div><dt className="text-muted">{t("admin.session.labelPermissions")}</dt><dd className="mt-1 text-ink">{permissionSummary}</dd></div>
               </dl>
+              <div className="mt-3"><Button type="button" onClick={refreshAll}>{t("admin.refresh")}</Button></div>
             </details>
           ) : null}
           {status === "loading" ? <Card title={t("admin.session.title")}><p className="text-xs text-muted">{t("admin.loading")}</p></Card> : null}
@@ -138,7 +138,7 @@ export function AppShell() {
           {status === "ready" && anyAllowed && tab === "reports" && allowed.reports ? <ReportsPanel reloadKey={reloadKey} /> : null}
         </main>
       </div>
-      <footer className="mx-auto w-full max-w-[80rem] border-t border-line px-4 py-4 text-[11px] leading-relaxed text-muted sm:px-6">{t("admin.footer")}</footer>
+
     </div>
   );
 }
