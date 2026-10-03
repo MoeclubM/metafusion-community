@@ -69,10 +69,10 @@ export function AppShell() {
   return (
     <div className="flex min-h-screen flex-col bg-surface text-ink">
       <header className="sticky top-0 z-30 border-b border-line bg-panel/95 backdrop-blur">
-        <div className="mx-auto flex min-h-14 flex-wrap py-2 w-full max-w-[80rem] items-center justify-between gap-3 px-4 sm:px-6">
+        <div className="mx-auto flex h-14 w-full max-w-[80rem] items-center justify-between gap-2 px-4 sm:px-6">
           <div className="flex min-w-0 flex-1 items-center gap-2">
-            <a href="/admin" className="inline-flex shrink-0 items-center gap-1 text-xs text-muted hover:text-ink"><span aria-hidden="true">←</span>{t("admin.backToHub")}</a>
-            <span className="text-muted">/</span>
+            <a href="/admin" aria-label={t("admin.backToHub")} title={t("admin.backToHub")} className="inline-flex h-11 w-11 sm:w-auto shrink-0 items-center justify-center gap-1 text-xs text-muted hover:text-ink"><span aria-hidden="true">←</span><span className="hidden sm:inline">{t("admin.backToHub")}</span></a>
+            <span className="hidden text-muted sm:inline">/</span>
             <h1 className="min-w-0 truncate text-sm font-semibold text-ink">{t("admin.appTitle")}</h1>
           </div>
           <div className="flex shrink-0 items-center gap-2">
