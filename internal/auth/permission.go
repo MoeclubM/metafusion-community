@@ -8,7 +8,7 @@ package auth
 // 系统组）：两边都只读令牌、谁也不查对方的库，唯一需要对齐的就是码的拼写。
 //
 // 收敛计划：这些码的单一来源将是协议层仓库 metafusion-sdk（常量 + 生成物），本服务改为依赖它，
-// 不再靠"逐字抄写 + 代码评审"对齐（见 docs/architecture/decoupling-audit-2026-09.md §3）。
+// 不再靠"逐字抄写 + 代码评审"对齐（见 docs/architecture/service-decoupling-roadmap.md §3）。
 // 本批次只登记这条路径，不引入依赖：码表仍由本文件声明，且必须与账号服务逐字一致。
 // 组码（community_moderator 等）与角色都不参与判定——散落的角色比较正是
 // 「后台分配了权限组、本服务却不认」的成因。
