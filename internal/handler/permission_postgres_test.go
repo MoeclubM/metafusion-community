@@ -21,9 +21,8 @@ import (
 )
 
 // 需要真实 PostgreSQL：验证"后台分配的权限组"在本服务真的生效 —— 持 community.post.moderate
-// 的成员可处置他人的主题与短评，只有 community.post.create 的成员不行；**老令牌**
-// （claims 里没有 permissions）只有发帖码兜底，治理类码 S01 起不再设 admin 兜底
-// （见 auth.permission.go 的 legacyOpenCodes）。未设置 COMMUNITY_TEST_DSN 时跳过。
+// 的成员可处置他人的主题与短评，只有 community.post.create 的成员不行；
+// claims 没有 permissions 的令牌不获发帖或治理权限。未设置 COMMUNITY_TEST_DSN 时跳过。
 func TestModerationEndpointsHonourPermissionCodes(t *testing.T) {
 	dsn := testutil.DSN(t)
 	db := testutil.Database(t)
@@ -180,7 +179,7 @@ func TestModerationEndpointsHonourPermissionCodes(t *testing.T) {
 
 // 发帖码是**真实闸门**：令牌带 permissions 却不含 community.post.create 时，三个写入口
 // （发主题 / 回帖 / 短评）一律 403 forbidden 且不写库；持码则 200；
-// 而老令牌（claims 里没有 permissions）按历史边界仍可发帖（见 auth.legacyOpenCodes）。
+// claims 里没有 permissions 的令牌同样被拒绝，不按角色授予发帖权限。
 func TestPostCreateRequiresPermissionCode(t *testing.T) {
 	ctx, db, router, key, kid := opsFixture(t)
 	authorToken := signTokenWith(t, key, kid, uuid.NewString(), "user", []string{"member"}, []string{auth.PermissionPostCreate})
