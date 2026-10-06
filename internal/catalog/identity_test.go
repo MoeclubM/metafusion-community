@@ -27,6 +27,7 @@ func identityPayload(canonical string, aliases ...string) string {
 		"canonical_id": canonical,
 		"aliases":      aliases,
 		"entity":       map[string]any{"id": canonical, "kind": "work", "title": "D", "status": "published"},
+		"complete":     true,
 	})
 	return string(raw)
 }
@@ -51,9 +52,9 @@ func sameSet(t *testing.T, got []string, want ...string) {
 func reverseStub() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		identity := map[string]string{
-			"/api/catalog/entities/" + txAliasA + "/identity": identityPayload(txAliasD, txAliasA, txAliasC),
-			"/api/catalog/entities/" + txAliasB + "/identity": identityPayload(txAliasD, txAliasB, txAliasC),
-			"/api/catalog/entities/" + txAliasC + "/identity": identityPayload(txAliasD, txAliasC),
+			"/api/catalog/entities/" + txAliasA + "/identity": identityPayload(txAliasD, txAliasA, txAliasB, txAliasC),
+			"/api/catalog/entities/" + txAliasB + "/identity": identityPayload(txAliasD, txAliasA, txAliasB, txAliasC),
+			"/api/catalog/entities/" + txAliasC + "/identity": identityPayload(txAliasD, txAliasA, txAliasB, txAliasC),
 			"/api/catalog/entities/" + txAliasD + "/identity": identityPayload(txAliasD, txAliasA, txAliasB, txAliasC),
 		}
 		if body, ok := identity[r.URL.Path]; ok {
@@ -70,13 +71,7 @@ func reverseStub() *httptest.Server {
 			for _, id := range in.IDs {
 				var aliases []string
 				switch id {
-				case txAliasA:
-					aliases = []string{txAliasA, txAliasC}
-				case txAliasB:
-					aliases = []string{txAliasB, txAliasC}
-				case txAliasC:
-					aliases = []string{txAliasC}
-				case txAliasD:
+				case txAliasA, txAliasB, txAliasC, txAliasD:
 					aliases = []string{txAliasA, txAliasB, txAliasC}
 				default:
 					missing = append(missing, id)
@@ -106,9 +101,9 @@ func TestResolveAliasSetAggregatesMergeDiamond(t *testing.T) {
 	sameSet(t, set, txAliasA, txAliasB, txAliasC, txAliasD)
 
 	for requested, want := range map[string][]string{
-		txAliasA: {txAliasA, txAliasC, txAliasD},
-		txAliasB: {txAliasB, txAliasC, txAliasD},
-		txAliasC: {txAliasC, txAliasD},
+		txAliasA: {txAliasA, txAliasB, txAliasC, txAliasD},
+		txAliasB: {txAliasA, txAliasB, txAliasC, txAliasD},
+		txAliasC: {txAliasA, txAliasB, txAliasC, txAliasD},
 	} {
 		canonical, set, err := c.ResolveAliasSet(ctx, requested)
 		if err != nil || canonical != txAliasD {
@@ -122,15 +117,14 @@ func TestResolveAliasSetAggregatesMergeDiamond(t *testing.T) {
 	}
 }
 
-// forwardOnlyStub 模拟今天的目录（只有前向别名）：查存活 D 拿不到历史 A/B。
-// X01-compat：此时读 D 只含 D（历史行待回填），读 A 覆盖前向链 {A,C,D} 正确。
+// forwardOnlyStub 模拟旧目录的前向别名响应，没有 complete 全集确认。
 func forwardOnlyStub() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/catalog/entities/" + txAliasA + "/identity":
-			_, _ = w.Write([]byte(identityPayload(txAliasD, txAliasA, txAliasC)))
+			_, _ = w.Write([]byte(`{"canonical_id":"` + txAliasD + `","aliases":["` + txAliasA + `","` + txAliasC + `"],"entity":{"id":"` + txAliasD + `"}}`))
 		case "/api/catalog/entities/" + txAliasD + "/identity":
-			_, _ = w.Write([]byte(identityPayload(txAliasD)))
+			_, _ = w.Write([]byte(`{"canonical_id":"` + txAliasD + `","aliases":[],"entity":{"id":"` + txAliasD + `"}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"not_found"}`))
@@ -138,22 +132,40 @@ func forwardOnlyStub() *httptest.Server {
 	}))
 }
 
-func TestResolveAliasSetForwardOnlyCompat(t *testing.T) {
+func TestResolveAliasSetRejectsForwardOnlyResponse(t *testing.T) {
 	srv := forwardOnlyStub()
 	defer srv.Close()
 	c := New(srv.URL, 2*time.Second)
 	ctx := context.Background()
 
-	if canonical, set, err := c.ResolveAliasSet(ctx, txAliasA); err != nil || canonical != txAliasD {
-		t.Fatalf("读 A 应归一到 D：canonical=%q err=%v", canonical, err)
-	} else {
-		sameSet(t, set, txAliasA, txAliasC, txAliasD)
+	for _, requested := range []string{txAliasA, txAliasD} {
+		if canonical, set, err := c.ResolveAliasSet(ctx, requested); !upstream.IsUnavailable(err) || canonical != "" || len(set) != 0 {
+			t.Fatalf("旧前向响应必须拒绝聚合：canonical=%q set=%v err=%v", canonical, set, err)
+		}
 	}
-	// 反向契约未落地：读 D 暂只含 D，不是正确结果，是已标注的兼容行为。
-	if canonical, set, err := c.ResolveAliasSet(ctx, txAliasD); err != nil || canonical != txAliasD {
-		t.Fatalf("读 D 应归一到自身：canonical=%q err=%v", canonical, err)
-	} else {
-		sameSet(t, set, txAliasD)
+}
+
+func TestIdentityRejectsIncompleteAliasSet(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload := map[string]any{
+			"canonical_id": txAliasD,
+			"aliases":      []string{txAliasA},
+			"complete":     false,
+			"entity":       map[string]any{"id": txAliasD},
+		}
+		if r.Method == http.MethodPost {
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": map[string]any{txAliasA: payload}, "missing": []string{}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(payload)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, 2*time.Second)
+	if v, err := c.Identity(context.Background(), txAliasA); !upstream.IsUnavailable(err) || v.CanonicalID != "" {
+		t.Fatalf("单条不完整响应必须回依赖错误：v=%+v err=%v", v, err)
+	}
+	if items, err := c.IdentityMany(context.Background(), []string{txAliasA}); !upstream.IsUnavailable(err) || items != nil {
+		t.Fatalf("批量不完整响应不得返回部分结果：items=%v err=%v", items, err)
 	}
 }
 

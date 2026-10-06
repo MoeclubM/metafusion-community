@@ -37,9 +37,8 @@ func (h *Handler) registerFavorites(api *gin.RouterGroup) {
 		// 取不到目录是 503（依赖故障），不是 404：把自己的故障说成"目标不存在"，
 		// 用户会以为条目被删了，运维在监控里也看不到这次故障。
 		requested := strings.TrimSpace(in.TargetID)
-		// X01：身份契约给 canonical + 前向历史别名；新写归一 canonical，切换按集合收敛——
-		// 经历史别名切换时前向链上的旧行一并收敛，不再与归一新行并存。
-		// X01-compat：经存活身份切换时历史行不可枚举（待目录反向契约），仅覆盖 {存活 + 请求 ID}。
+		// 身份契约确认 canonical + 全量历史别名；新写归一 canonical，切换按集合收敛。
+		// 经存活身份或历史别名切换都覆盖旧行，不与归一新行并存。
 		v, err := h.catalog.Identity(c.Request.Context(), requested)
 		if err != nil {
 			failUpstream(c)

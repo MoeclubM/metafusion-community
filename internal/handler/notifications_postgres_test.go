@@ -103,6 +103,7 @@ func newNotifyHarness(t *testing.T) *notifyHarness {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"canonical_id": id,
 				"aliases":      []any{},
+				"complete":     true,
 				"entity":       map[string]any{"id": id, "kind": "work", "title": "测试作品", "status": "published"},
 			})
 			return

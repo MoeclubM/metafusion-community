@@ -62,6 +62,8 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 - 目录侧取不到（超时 / 连接失败 / 5xx / 429 / 熔断打开）→ `503` + `{"error":"upstream_unavailable"}`。
   目录地址未配置也按同一依赖错误处理，不返回伪造的身份、404 或空成功结果。
+  身份解析响应必须包含 `canonical_id` 与 `complete=true`，确认 `aliases` 覆盖全部历史身份；
+  缺少完整性确认或返回部分别名时拒绝聚合，按同一 `503 upstream_unavailable` 处理。
   受影响的是所有需要目录才能成形响应的端点：`GET /api/community/feed`（评论流）、主题列表与详情
   （`entity_title`）、`GET /api/community/posts/{id}`、`GET /api/community/entities/{id}/collections`、
   `POST /api/favorites/toggle`、`GET /api/favorites/mine`、`GET /api/users/{id}/favorites`。
@@ -290,14 +292,12 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 | `community.topic.pin` | 置顶 / 取消置顶主题（`PUT /api/community/topics/{id}/pin`） |
 | `community.board.manage` | 板块配置（`PUT /api/community/boards/{code}`） |
 
-**兼容策略**：令牌**完全没有** `permissions` 声明时（老令牌，或尚未按权限组配置的实例）按历史边界兜底：
-发帖类码（`community.post.create`）放行——收口前发帖只要求登录，账号服务尚未升级的实例不能因为收口而变成
-"除了管理员谁都不能发帖"；治理类码（moderate / pin / board.manage）只认 `role=admin`，与改造前一致。
-令牌一旦带 `permissions` 就只认码，角色不再额外放行，避免「角色兜底」变成绕过权限组的后门。
+未声明 `permissions` 或权限集合为空的身份不获得写权限；仅持有对应权限码或 `*` 通配时放行。
+组码与角色不额外授予权限，第三方访问令牌默认不能调用治理接口。
 
 **个人访问令牌（PAT）**：`Authorization: Bearer mfp_…`（`mfp_` + 43 位 base62）由账号服务的
 `POST /api/auth/tokens/introspect` 判定，本服务**不读账号库、不签发、不落盘凭据**。内省拿到的身份与 JWT 同形
-（id / username / role / permissions），但**权限一律按 permissions 里的码判定**：即使权限集合为空也绝不回落到
+（id / username / permissions），**权限一律按 permissions 里的码判定**：即使权限集合为空也绝不回落到
 角色兜底或历史的"登录即可"边界——PAT 的权限就是账号服务算好的"用户自身权限 ∩ scopes"，否则 `scopes=[]`
 的管理员令牌会变成全权令牌（创建端点已禁止空 scopes，这是第二道防线）。
 

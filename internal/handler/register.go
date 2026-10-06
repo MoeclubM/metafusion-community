@@ -129,8 +129,7 @@ func (h *Handler) principal(c *gin.Context) *auth.Principal { return auth.Curren
 // canonicalEntity 确认实体对调用者可见并返回归一后的 canonical ID（X01）：
 // 合并 A→B 后对 A 的新写必须落到 B，读 A/B 都要覆盖别名集合（见 catalog.ResolveAliasSet）。
 // 返回 ("", false) 时响应已写出（404 不可见 / 503 取不到），调用方直接 return。
-// X01-compat：canonical 取自目录身份契约；读存活页聚合全部历史别名待目录反向契约，
-// 新写归一 + 前向链覆盖已正确，历史行在存活页的聚合待契约就绪后由展开点自动补齐。
+// canonical 与全部历史别名取自目录完整身份契约，未确认完整性的响应回依赖错误。
 func (h *Handler) canonicalEntity(c *gin.Context, id string) (string, bool) {
 	canonical, _, ok := h.aliasSet(c, id)
 	return canonical, ok

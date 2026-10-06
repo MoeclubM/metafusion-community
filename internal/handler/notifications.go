@@ -113,7 +113,7 @@ func (h *Handler) entityProjectionForNotify(ctx context.Context, entityID string
 
 // notifyEntityComment 是短评（参与式关注）的产生端：entityID 必须已归一 canonical，
 // requested 保留请求别名以覆盖历史参与人（X01 别名集合，见 commentParticipants）。
-// X01-compat：全量别名经 ResolveAliasSet 展开（目录反向契约就绪后自动含全部历史）；
+// 全量别名经 ResolveAliasSet 展开，目录必须确认 complete=true；
 // 展开失败是旁路故障，回退 {canonical + 请求别名} 并记日志，不影响短评本身。
 func (h *Handler) notifyEntityComment(c *gin.Context, entityID, requested, commentID, body string) {
 	p := h.principal(c)

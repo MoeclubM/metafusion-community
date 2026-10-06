@@ -197,12 +197,13 @@ func (c *Client) ResolveMany(ctx context.Context, ids []string) (map[string]stri
 }
 
 // IdentityResolution 是目录身份契约的只读投影（主仓 lifecycle.go 的 IdentityResolution）：
-// canonical_id 为存活身份，aliases 为请求 ID 沿 merged 链走过的历史别名。
-// aliases 同时包含正向合并链与存活身份的反向历史别名全集。
+// canonical_id 为存活身份，aliases 同时包含正向合并链与存活身份的反向历史别名全集。
+// complete=true 才可按全集聚合；缺失或 false 表示目录契约不完整。
 type IdentityResolution struct {
 	CanonicalID string   `json:"canonical_id"`
 	Aliases     []string `json:"aliases"`
 	Entity      Entity   `json:"entity"`
+	Complete    bool     `json:"complete"`
 }
 
 // Identity 取单个身份解析。零值 + nil = 目录明确回答不可见/不存在；err != nil = 取不到。
@@ -232,6 +233,9 @@ func (c *Client) Identity(ctx context.Context, entityID string) (IdentityResolut
 		}
 		if v.CanonicalID == "" {
 			return IdentityResolution{}, upstreamError(c.name(), upstream.ReasonBadResponse, 0, errors.New("identity payload without canonical_id"))
+		}
+		if !v.Complete {
+			return IdentityResolution{}, upstreamError(c.name(), upstream.ReasonBadResponse, 0, errors.New("identity payload without complete alias set"))
 		}
 		return v, nil
 	case http.StatusNotFound:
@@ -283,9 +287,10 @@ func (c *Client) IdentityMany(ctx context.Context, ids []string) (map[string]Ide
 			return nil, upstreamError(c.name(), upstream.ReasonBadResponse, 0, err)
 		}
 		for id, v := range payload.Items {
-			if v.CanonicalID != "" {
-				out[id] = v
+			if v.CanonicalID == "" || !v.Complete {
+				return nil, upstreamError(c.name(), upstream.ReasonBadResponse, 0, errors.New("batch identity payload without canonical_id or complete alias set"))
 			}
+			out[id] = v
 		}
 		return out, nil
 	default:
@@ -296,10 +301,7 @@ func (c *Client) IdentityMany(ctx context.Context, ids []string) (map[string]Ide
 // ResolveAliasSet 是 X01 读路径唯一的别名展开点：一次调用拿齐 {canonical + 全量历史别名}。
 // 成功时返回的集合已含请求 ID 自身并去重，调用方直接用于 entity_id = ANY($集)；
 // ("", nil, nil) = 不可见/不存在；err != nil = 取不到（调用方 503）。
-//
-// X01-compat（反向契约未落地）：目录今天只回前向别名，读存活身份 D 拿不到历史 A/B，
-// 此时集合退化为 {D + 请求 ID}——读 A 覆盖前向链正确，读 D 仍只含 D（历史 A/B 行待回填）。
-// 目录补齐存活→历史反向后，同一调用自动拿到全量，SQL 与调用方都不用改。
+// 身份响应必须确认 complete=true，前向别名或部分结果不能伪装成完整聚合。
 func (c *Client) ResolveAliasSet(ctx context.Context, requested string) (string, []string, error) {
 	if requested == "" {
 		return "", nil, nil
@@ -316,8 +318,7 @@ func (c *Client) ResolveAliasSet(ctx context.Context, requested string) (string,
 
 // AliasSet 组装一次读取要覆盖的 ID 集合：{canonical + 传入的全部历史别名} 去重保序。
 // 它是纯函数：全量历史由调用方经 ResolveAliasSet/IdentityMany 从目录身份契约取来，
-// 这里只做去重；目录反向契约未落地前，调用方只能传 {请求 ID}，读存活页的聚合因此不完整
-// （见 ResolveAliasSet 的 X01-compat 注释），不要在本函数里把“集合很小”当成正确。
+// 这里只做去重，调用方负责校验目录响应的 complete 标记。
 func AliasSet(canonical string, requested ...string) []string {
 	seen := map[string]bool{}
 	out := []string{}
