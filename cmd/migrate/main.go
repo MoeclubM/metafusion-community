@@ -98,9 +98,8 @@ var backSteps = []step{
 }
 
 func main() {
-	// 默认连接串与常驻服务同一条装配路径（config.Load：先 DATABASE_URL，再用 DB_* 拼），
-	// 因此编排里只给 DB_* 就能跑，不需要为这个一次性工具额外配一份连接串。
-	dsn := flag.String("dsn", config.Load().DatabaseURL, "PostgreSQL 连接串（默认取 DATABASE_URL，其次用 DB_* 拼装）")
+	// 数据搬运需要显式的管理连接串；可由 -dsn 覆盖 DATABASE_URL。
+	dsn := flag.String("dsn", config.Load().DatabaseURL, "PostgreSQL 连接串（默认取 DATABASE_URL）")
 	direction := flag.String("direction", "forward", "forward=主仓库→互动服务；back=互动服务→主仓库（回滚）")
 	dryRun := flag.Bool("dry-run", false, "只统计将要搬运的行数，不写入")
 	flag.Parse()

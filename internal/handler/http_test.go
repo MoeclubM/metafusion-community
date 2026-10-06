@@ -187,7 +187,12 @@ func TestAuthBoundaryBeforeDatabase(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	verifier := newVerifier(t, "http://127.0.0.1:1/jwks")
 	r := gin.New()
-	New(&store.Store{}, catalog.New("", 0), verifier).Register(r)
+	notFound := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not_found"}`))
+	}))
+	defer notFound.Close()
+	New(&store.Store{}, catalog.New(notFound.URL, 0), verifier).Register(r)
 
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodPost, "/api/community/topics"},
@@ -202,7 +207,7 @@ func TestAuthBoundaryBeforeDatabase(t *testing.T) {
 		}
 	}
 
-	// 匿名读：实体经目录接口判定不可见（目录地址为空）时一律 404，且不查库。
+	// 匿名读：目录明确回答不可见时一律 404，且不查库。
 	for _, path := range []string{
 		"/api/community/entities/" + uuid.NewString() + "/posts",
 		"/api/community/entities/" + uuid.NewString() + "/collections",

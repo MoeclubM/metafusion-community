@@ -480,7 +480,6 @@ func (h *Handler) registerForum(api *gin.RouterGroup) {
 		tags, _ := h.topicTags(c.Request.Context(), []string{id})
 		out := t.toMap()
 		out["posts"] = posts
-		out["comments"] = posts
 		if tg, ok := tags[id]; ok {
 			out["tags"] = tg
 		} else {

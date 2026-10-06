@@ -73,7 +73,7 @@ func New(base string, budgetFloor time.Duration) *Client {
 
 // newClient 允许注入执行器：测试要断言"重试有界""熔断打开"不能靠真等 2s 的单次超时。
 func newClient(base string, up *upstream.Client) *Client {
-	return &Client{base: strings.TrimRight(base, "/"), up: up, notify: upstream.New(notifyPolicy())}
+	return &Client{base: strings.TrimRight(strings.TrimSpace(base), "/"), up: up, notify: upstream.New(notifyPolicy())}
 }
 
 // Upstream 返回出站执行器：/ready?deep=1 的深探针与请求路径共用它——
@@ -90,9 +90,11 @@ func (c *Client) Upstream() *upstream.Client { return c.up }
 // 合并只广播事件、不在别人表里改引用，跟随重定向是引用方自己的责任，
 // 否则用户收藏/互动记录里指向旧身份的条目会静默消失。
 func (c *Client) LookupRaw(ctx context.Context, entityID string) (json.RawMessage, error) {
-	// 未配置上游地址：与"没有这个实体"同解（既有行为，本服务不因此改成 503）。
-	if c.base == "" || entityID == "" {
+	if entityID == "" {
 		return nil, nil
+	}
+	if c.base == "" {
+		return nil, c.notConfiguredError()
 	}
 	raw, err := c.fetchEntity(ctx, entityID)
 	if err != nil {
@@ -156,13 +158,10 @@ func (c *Client) Lookup(ctx context.Context, entityID string) (Entity, error) {
 // ResolveCanonical 把请求 ID 归一到存活身份（canonical）：合并 A→B 后对 A 的新写
 // 必须落到 B，否则 B 页永远看不到 A 的历史评论/收藏（见 X01）。实现即 Lookup
 // （已跟随 /resolve）：返回 "" + nil 表示目录明确回答不可见/不存在，调用方按 404；
-// err != nil 表示取不到，调用方按 503。未配置上游地址时原样返回请求 ID（既有行为）。
+// err != nil 表示取不到，调用方按 503。
 func (c *Client) ResolveCanonical(ctx context.Context, entityID string) (string, error) {
 	if entityID == "" {
 		return "", nil
-	}
-	if c.base == "" {
-		return entityID, nil
 	}
 	e, err := c.Lookup(ctx, entityID)
 	if err != nil {
@@ -181,12 +180,6 @@ func (c *Client) ResolveCanonical(ctx context.Context, entityID string) (string,
 func (c *Client) ResolveMany(ctx context.Context, ids []string) (map[string]string, error) {
 	out := map[string]string{}
 	if len(ids) == 0 {
-		return out, nil
-	}
-	if c.base == "" {
-		for _, id := range ids {
-			out[id] = id
-		}
 		return out, nil
 	}
 	meta, err := c.LookupMany(ctx, ids)
@@ -216,11 +209,11 @@ type IdentityResolution struct {
 //
 // 404 表示目录明确回答不可见/不存在；接口不存在属于部署契约错误。
 func (c *Client) Identity(ctx context.Context, entityID string) (IdentityResolution, error) {
-	if c.base == "" || entityID == "" {
-		if entityID == "" {
-			return IdentityResolution{}, nil
-		}
-		return IdentityResolution{CanonicalID: entityID}, nil
+	if entityID == "" {
+		return IdentityResolution{}, nil
+	}
+	if c.base == "" {
+		return IdentityResolution{}, c.notConfiguredError()
 	}
 	resp, err := c.up.Do(ctx, upstream.Request{
 		Method: http.MethodGet,
@@ -258,15 +251,11 @@ func (c *Client) Identity(ctx context.Context, entityID string) (IdentityResolut
 // 返回 requested→解析（不可见的不在结果里，调用方按 404/跳过）；err != nil = 上游不可用。
 func (c *Client) IdentityMany(ctx context.Context, ids []string) (map[string]IdentityResolution, error) {
 	out := map[string]IdentityResolution{}
-	if c.base == "" || len(ids) == 0 {
-		if c.base == "" {
-			for _, id := range ids {
-				if id != "" {
-					out[id] = IdentityResolution{CanonicalID: id}
-				}
-			}
-		}
+	if len(ids) == 0 {
 		return out, nil
+	}
+	if c.base == "" {
+		return nil, c.notConfiguredError()
 	}
 	raw, err := json.Marshal(map[string]any{"ids": ids})
 	if err != nil {
@@ -315,11 +304,6 @@ func (c *Client) ResolveAliasSet(ctx context.Context, requested string) (string,
 	if requested == "" {
 		return "", nil, nil
 	}
-	if c.base == "" {
-		// 未配置上游地址与“没有这个实体”同解（同 LookupRaw 既有口径）：读路径按 404，
-		// 且调用方不得再查库（见 handler 的 TestAuthBoundaryBeforeDatabase）。
-		return "", nil, nil
-	}
 	v, err := c.Identity(ctx, requested)
 	if err != nil {
 		return "", nil, err
@@ -354,8 +338,11 @@ func AliasSet(canonical string, requested ...string) []string {
 // 拿它渲染列表就是"条目凭空消失"。
 func (c *Client) LookupMany(ctx context.Context, ids []string) (map[string]Entity, error) {
 	out := map[string]Entity{}
-	if c.base == "" || len(ids) == 0 {
+	if len(ids) == 0 {
 		return out, nil
+	}
+	if c.base == "" {
+		return nil, c.notConfiguredError()
 	}
 	const workers = 8
 	var (
@@ -412,8 +399,11 @@ deliver:
 // 关系与端点实体一次取回，避免逐条请求。
 // (nil, nil) = 目录明确回答"没有邻居"；err != nil = 取不到（调用方必须 503，不能回空 items）。
 func (c *Client) Related(ctx context.Context, entityID string, kinds []string) ([]Entity, error) {
-	if c.base == "" || entityID == "" {
+	if entityID == "" {
 		return nil, nil
+	}
+	if c.base == "" {
+		return nil, c.notConfiguredError()
 	}
 	resp, err := c.up.Do(ctx, upstream.Request{
 		Method: http.MethodGet,
@@ -466,6 +456,10 @@ func (c *Client) Related(ctx context.Context, entityID string, kinds []string) (
 }
 
 func (c *Client) name() string { return c.up.Name() }
+
+func (c *Client) notConfiguredError() error {
+	return upstreamError(c.name(), upstream.ReasonNotConfigured, 0, errors.New("CATALOG_URL is required"))
+}
 
 // outboundHeaders 组装出站请求头：调用者的凭据必须原样转发，否则目录侧的可见性判定会退化成
 // 匿名，草稿/待审条目会被误判成不可见（见 auth.WithCredentials）。

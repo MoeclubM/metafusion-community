@@ -37,6 +37,34 @@ func assertUpstreamUnavailable(t *testing.T, w *httptest.ResponseRecorder) {
 	}
 }
 
+func TestMissingCatalogConfigurationReturnsDependencyError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, kid := jwksServer(t, key)
+	verifier := newVerifier(t, srv.URL)
+	router := gin.New()
+	New(&store.Store{}, catalog.New("", 0), verifier).Register(router)
+	id := uuid.NewString()
+	for _, path := range []string{
+		"/api/community/entities/" + id + "/posts",
+		"/api/community/entities/" + id + "/collections",
+	} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		assertUpstreamUnavailable(t, w)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/favorites/toggle",
+		strings.NewReader(`{"target_type":"work","target_id":"`+id+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+signToken(t, key, kid, "user"))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	assertUpstreamUnavailable(t, w)
+}
+
 // 目录服务 503 时：收藏切换（写路径，判定在落库之前）与关联合集（读路径）都必须 503，
 // 而不是 not_found / 空 items。
 func TestCatalogOutageIsReportedAsUpstreamUnavailable(t *testing.T) {

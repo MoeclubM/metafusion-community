@@ -1,7 +1,6 @@
 package config
 
 import (
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -14,7 +13,7 @@ import (
 // 服务只依赖 PostgreSQL 与两个上游：目录（可见性/元信息）与账号（验签公钥）。
 type Config struct {
 	Port string
-	// DatabaseURL 为 PostgreSQL 连接串；为空时由 DB_* 拼装。
+	// DatabaseURL 是本服务独立数据库身份的显式连接串，启动时必填。
 	DatabaseURL string
 	// JWKSURL 验签公钥来源：账号服务是令牌的唯一签发方，因此指向它。
 	JWKSURL string
@@ -64,25 +63,7 @@ func Load() Config {
 		OutboxWorkerBatch:    envInt("COMMUNITY_OUTBOX_WORKER_BATCH", 50),
 		TrustedProxies:       env(nettrust.EnvVar, ""), // TRUSTED_PROXIES：留空即 nettrust 的保守默认
 	}
-	if c.DatabaseURL == "" {
-		c.DatabaseURL = buildDSN()
-	}
 	return c
-}
-
-// buildDSN 用 url.URL 拼连接串：口令里的 @ : / ? # 等字符必须转义，
-// 直接字符串拼接会在这些字符上拼出非法 DSN（或连错主机）。
-func buildDSN() string {
-	u := url.URL{
-		Scheme: "postgres",
-		Host:   env("DB_HOST", "localhost") + ":" + env("DB_PORT", "5432"),
-		Path:   env("DB_NAME", "metafusion_db"),
-		User:   url.UserPassword(env("DB_USER", "metafusion"), os.Getenv("DB_PASSWORD")),
-	}
-	q := u.Query()
-	q.Set("sslmode", env("DB_SSLMODE", "disable"))
-	u.RawQuery = q.Encode()
-	return u.String()
 }
 
 func env(k, def string) string {

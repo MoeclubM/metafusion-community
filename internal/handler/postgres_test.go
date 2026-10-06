@@ -156,7 +156,17 @@ func TestForumEndpointsAgainstPostgres(t *testing.T) {
 		t.Fatalf("主题列表未补齐实体标题: %s", string(raw))
 	}
 
-	// 4) 回帖：楼层号从 1 开始。
+	// 4) 无回帖时 posts 仍是空数组；正文在 content，不返回旧 comments 别名。
+	w, emptyDetail := call(http.MethodGet, "/api/community/topics/"+topicID, "", "")
+	emptyPosts, isArray := emptyDetail["posts"].([]any)
+	if w.Code != 200 || !isArray || len(emptyPosts) != 0 || emptyDetail["content"] != "正文" {
+		t.Fatalf("无回帖详情必须包含正文与空 posts 数组: %d %s", w.Code, w.Body.String())
+	}
+	if _, present := emptyDetail["comments"]; present {
+		t.Fatalf("主题详情仍返回旧 comments 别名: %s", w.Body.String())
+	}
+
+	// 回帖楼号从 2 开始，1 楼由主题正文表示。
 	w, _ = call(http.MethodPost, "/api/community/topics/"+topicID+"/posts", `{"content":"一楼"}`, token)
 	if w.Code != 200 {
 		t.Fatalf("回帖 HTTP %d: %s", w.Code, w.Body.String())
@@ -170,6 +180,13 @@ func TestForumEndpointsAgainstPostgres(t *testing.T) {
 	posts, _ := detail["posts"].([]any)
 	if len(posts) != 1 {
 		t.Fatalf("主题详情回复数 = %d: %s", len(posts), w.Body.String())
+	}
+	if _, present := detail["comments"]; present {
+		t.Fatalf("含回帖详情仍返回旧 comments 别名: %s", w.Body.String())
+	}
+	post, _ := posts[0].(map[string]any)
+	if detail["content"] != "正文" || post["content"] != "一楼" || post["post_number"] != float64(2) {
+		t.Fatalf("主题正文或真实回帖楼号不正确: %s", w.Body.String())
 	}
 	if tagList, _ := detail["tags"].([]any); len(tagList) != 1 {
 		t.Fatalf("主题详情标签 = %v", detail["tags"])

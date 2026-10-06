@@ -18,15 +18,14 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 
 ## HTTP 契约
 
-绝大多数路径与请求/响应形状与原单体 `modules` 包**逐字一致**，切流时前端零改动；已知例外只有一处，
-见下面「语言维度只去接口层」。切流动作于 **2026-09-14 在开发实例完成**，以下仅为历史记录；当前网关唯一生效的路径归属见主仓库 [子系统拆分与迁移基准](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/service-split-migration.md)，网关矩阵见主仓库 `deploy/nginx.conf`。
+下表列出当前接口契约。网关路径归属见主仓库 [子系统拆分与迁移基准](https://github.com/MoeclubM/MetaFusion/blob/main/docs/architecture/service-split-migration.md)，路由矩阵见主仓库 `deploy/nginx.conf`。
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
 | GET | `/api/community/boards` | 匿名 | 板块列表（只含 `is_enabled=true`；持 `community.board.manage` 时含停用板块，见「板块」） |
 | GET | `/api/community/topics` | 匿名 | 主题列表：板块/标签/关键词筛选、置顶优先、分页；停用板块的主题不在其中 |
 | GET | `/api/community/topic-tags` | 匿名 | 标签清单（`[{id,name}]`，供前端按 id 筛选） |
-| GET | `/api/community/topics/{id}` | 匿名 | 主题详情（含回复、标签、锚定实体题名）；浏览量自增；停用板块的主题按不存在处理（404 `not_found`，且不自增） |
+| GET | `/api/community/topics/{id}` | 匿名 | 主题详情：`content` 是主题正文，`posts` 是按 `post_number` 排序的回帖数组（无回帖时为 `[]`，回帖楼号从 2 开始）；含标签与锚定实体题名；浏览量自增；停用板块的主题 404 `not_found` 且不自增 |
 | POST | `/api/community/topics` | `community.post.create` | 发主题（可锚定实体、可带标签） |
 | POST | `/api/community/topics/{id}/posts` | `community.post.create` | 回帖（`post_number` 楼层、可引用楼号） |
 | DELETE | `/api/community/topics/{id}` | 作者 / `community.post.moderate` | 删主题（级联回复） |
@@ -62,6 +61,7 @@ MetaFusion 社区互动服务：论坛（板块/主题/回复/标签）、条目
 `internal/upstream`（超时分层 + 有界重试 + 熔断），失败**不再折成空结果**：
 
 - 目录侧取不到（超时 / 连接失败 / 5xx / 429 / 熔断打开）→ `503` + `{"error":"upstream_unavailable"}`。
+  目录地址未配置也按同一依赖错误处理，不返回伪造的身份、404 或空成功结果。
   受影响的是所有需要目录才能成形响应的端点：`GET /api/community/feed`（评论流）、主题列表与详情
   （`entity_title`）、`GET /api/community/posts/{id}`、`GET /api/community/entities/{id}/collections`、
   `POST /api/favorites/toggle`、`GET /api/favorites/mine`、`GET /api/users/{id}/favorites`。
@@ -362,7 +362,7 @@ go run cmd/migrate -direction back
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `PORT` | `8083` | 监听端口 |
-| `DATABASE_URL` | 由 `DB_*` 拼装 | PostgreSQL 连接串（业务表在 `community` schema；审计表在跨服务共用的 `audit`，见「审计留痕」） |
+| `DATABASE_URL` | 必填 | 互动域专用 PostgreSQL 身份的连接串；不读取 `DB_*`。业务表在 `community` schema，审计表在 `audit`（见「审计留痕」） |
 | `COMMUNITY_JWKS_URL` | `http://auth:8081/api/oidc/jwks` | 验签公钥来源：账号服务是唯一签发方 |
 | `AUTH_URL` | 空 | 账号服务地址：PAT 内省（`POST /api/auth/tokens/introspect`）及健康探针；留空时 PAT 一律 `503 auth_unavailable` |
 | `AUTH_JWT_PUBLIC_KEY` | 空 | 静态公钥（PEM 或 base64 PEM）；设置后不再请求 JWKS |
@@ -372,6 +372,10 @@ go run cmd/migrate -direction back
 | `TRUSTED_PROXIES` | 空 | 应用层信任的反向代理范围（IP/CIDR 逗号分隔；留空 = 回环 + RFC1918 私网 = 网关容器所在网段，`none` = 入口链上没有代理）。决定审计 `actor_ip` 与按 IP 限流所用的 `ClientIP()`；非法项直接拒绝启动 |
 
 ## 运行
+
+直接运行服务时必须设置 `DATABASE_URL`。使用本仓 Compose 时，复制 `.env.example` 为 `.env` 并填写
+`COMMUNITY_DATABASE_URL`，编排会把它注入容器的 `DATABASE_URL`；业务身份仅拥有互动域及所需审计权限。
+显式数据搬运工具 `cmd/migrate` 使用 `-dsn` 或 `DATABASE_URL`，由操作者提供该迁移所需的管理身份。
 
 ```bash
 go run cmd/server/main.go

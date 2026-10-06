@@ -1,7 +1,7 @@
 version: '3.8'
 
 # 互动服务独立编排：只依赖 PostgreSQL（自有 community schema）与两个上游
-# （目录服务判可见性、账号服务签令牌）。切流前单体仍在服务流量，两者共用同一库。
+# （目录服务判可见性、账号服务签令牌）。业务容器只使用互动域数据库身份。
 services:
   community:
     build: .
@@ -9,11 +9,7 @@ services:
     restart: unless-stopped
     environment:
       - PORT=8083
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_USER=${DB_USER:-metafusion}
-      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD must be set in .env}
-      - DB_NAME=${COMMUNITY_DB_NAME:-metafusion_db}
+      - DATABASE_URL=${COMMUNITY_DATABASE_URL:?COMMUNITY_DATABASE_URL must be set in .env}
       # 账号服务是唯一签发方：JWKS 与不透明会话令牌的兜底都问它（与主工程编排一致）。
       - COMMUNITY_JWKS_URL=${COMMUNITY_JWKS_URL:-http://auth:8081/api/oidc/jwks}
       - AUTH_URL=${AUTH_URL:-http://auth:8081}

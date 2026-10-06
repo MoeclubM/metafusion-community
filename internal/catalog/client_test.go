@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -12,6 +13,36 @@ import (
 
 	"github.com/MoeclubM/metafusion-community/internal/upstream"
 )
+
+func TestMissingCatalogConfigurationIsUnavailable(t *testing.T) {
+	ctx := context.Background()
+	c := New("  ", 0)
+	const id = "44444444-4444-4444-4444-444444444444"
+	cases := map[string]func() error{
+		"LookupRaw":        func() error { _, err := c.LookupRaw(ctx, id); return err },
+		"Lookup":           func() error { _, err := c.Lookup(ctx, id); return err },
+		"LookupMany":       func() error { _, err := c.LookupMany(ctx, []string{id}); return err },
+		"ResolveCanonical": func() error { _, err := c.ResolveCanonical(ctx, id); return err },
+		"ResolveMany":      func() error { _, err := c.ResolveMany(ctx, []string{id}); return err },
+		"Identity":         func() error { _, err := c.Identity(ctx, id); return err },
+		"IdentityMany":     func() error { _, err := c.IdentityMany(ctx, []string{id}); return err },
+		"ResolveAliasSet":  func() error { _, _, err := c.ResolveAliasSet(ctx, id); return err },
+		"Related":          func() error { _, err := c.Related(ctx, id, []string{"collection"}); return err },
+	}
+	for name, call := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := call()
+			var unavailable *upstream.Error
+			if !errors.As(err, &unavailable) || unavailable.Code() != upstream.CodeUpstreamUnavailable || unavailable.Reason != upstream.ReasonNotConfigured {
+				t.Fatalf("未配置目录地址应返回依赖不可用，实际 %v", err)
+			}
+		})
+	}
+	// 没有待查 ID 的批量请求不需要依赖，不应凭空报目录故障。
+	if items, err := c.LookupMany(ctx, nil); err != nil || len(items) != 0 {
+		t.Fatalf("空查询应返回空集合：items=%v err=%v", items, err)
+	}
+}
 
 // 合并只广播事件、不改写别人表里的引用，因此引用方必须自己跟随重定向：
 // 旧身份直接取会 404，这时再问 /resolve，否则收藏/互动记录会静默消失。
